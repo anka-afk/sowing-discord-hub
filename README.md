@@ -18,9 +18,9 @@
 ```text
 sowing-discord-hub/
 ├── hub-backend/    # FastAPI + SQLite(WAL) + Litestream + R2/Local + Caddy 一键 HTTPS + 多管理员 CLI
-├── hub-web/        # Vue 3 + TypeScript + Vite SPA（广场、投稿、键盘流审核台 + 浏览器 Canvas 720×1800 切片）
-├── collector/      # 独立单官方号 OneBot v11 WS 投稿群初筛采集器（AC 自动机 + pHash + HMAC）
-└── tests/e2e/      # 跨仓库全链路端到端集成测试（联动 astrbot_sowing_discord@v2）
+├── hub-web/        # Vue 3 + TypeScript + Vite SPA（广场、投稿、键盘流审核台 + 浏览器 Canvas 1080×1920 高清切片）
+├── collector/      # 独立单官方号 OneBot v11 WS 投稿群初筛采集器（AC 自动机 + pHash + HMAC + 3层递归套娃）
+└── tests/e2e/      # 跨仓库全链路端到端集成测试（联动 astrbot_sowing_discord@main）
 ```
 
 ---
@@ -50,7 +50,7 @@ git clone https://github.com/anka-afk/sowing-discord-hub.git
 cd sowing-discord-hub/hub-backend
 cp .env.example .env
 # 编辑 .env：务必替换 JWT_SECRET、HMAC_SALT、COLLECTOR_HMAC_SECRET、ADMIN_PASSWORD，
-# 并填入 Cloudflare R2 凭证与 API_DOMAIN=api.banshi.ankaanka.org
+# 并填入 Cloudflare R2 凭证（或留 STORAGE_BACKEND=local + Cloudflare CDN）与 API_DOMAIN=banshi-api.ankaanka.org
 
 # 一键启动后端 + Caddy 自动 HTTPS + Litestream 实时备份 SQLite 至 R2
 docker compose --profile production up -d --build
