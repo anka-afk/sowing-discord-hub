@@ -54,12 +54,20 @@ function resolveInlineImg(part: { url?: string; media_id?: string }) {
           <div class="chat-bubble">
             <template v-for="(part, pIdx) in msg.content" :key="pIdx">
               <p v-if="part.type === 'text'" class="chat-text">{{ part.text }}</p>
-              <div v-else-if="part.type === 'image'" class="chat-inline-img-wrap">
+              <div v-else-if="part.type === 'image' || part.type === 'gif'" class="chat-inline-img-wrap">
                 <img
                   :src="resolveInlineImg(part)"
                   alt="聊天插图"
                   class="chat-inline-img"
                   loading="lazy"
+                />
+              </div>
+              <div v-else-if="part.type === 'forward_quote'" class="chat-nested-quote">
+                <ChatPreviewCard
+                  :messages="part.messages"
+                  :title="part.title || '嵌套聊天记录'"
+                  :admin-context="adminContext"
+                  compact
                 />
               </div>
             </template>
@@ -194,5 +202,13 @@ function resolveInlineImg(part: { url?: string; media_id?: string }) {
   width: auto;
   border-radius: 8px;
   object-fit: contain;
+}
+
+.chat-nested-quote {
+  margin-top: 4px;
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  overflow: hidden;
+  max-width: 100%;
 }
 </style>

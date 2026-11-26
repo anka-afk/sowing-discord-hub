@@ -200,15 +200,19 @@ def flatten_forward_nodes(
     alias_mapper: AliasMapper,
     pending_images: list[tuple[dict[str, Any], PendingImageRef]],
     plain_texts: list[str],
-    max_depth: int = 1,
-    max_nodes: int = 20,
+    forward_nodes_map: dict[str, list[dict[str, Any]]] | None = None,
+    max_depth: int = 3,
+    max_nodes: int = 50,
     current_depth: int = 0,
+    node_budget: list[int] | None = None,
 ) -> list[dict[str, Any]]:
-    """Flatten OneBot v11 forward message nodes with hard max_depth=1 and max_nodes=20 limits."""
+    """Convert OneBot v11 forward message nodes into desensitized messages with recursive forward_quote."""
     messages: list[dict[str, Any]] = []
+    fmap = forward_nodes_map or {}
+    budget = node_budget if node_budget is not None else [max_nodes]
 
     for node in nodes:
-        if len(messages) >= max_nodes:
+        if budget[0] <= 0:
             break
         if not isinstance(node, dict):
             continue
@@ -269,37 +273,41 @@ def flatten_forward_nodes(
                         )
                     )
             elif stype == "forward":
-                nested = sdata.get("content") or sdata.get("messages")
-                if current_depth < max_depth and isinstance(nested, list):
-                    remaining = max_nodes - len(messages)
-                    if remaining > 0:
-                        flattened_children = flatten_forward_nodes(
-                            nested,
-                            alias_mapper=alias_mapper,
-                            pending_images=pending_images,
-                            plain_texts=plain_texts,
-                            max_depth=max_depth,
-                            max_nodes=remaining,
-                            current_depth=current_depth + 1,
+                inner_fid = str(sdata.get("id") or "")
+                nested = (
+                    (fmap.get(inner_fid) if inner_fid else None)
+                    or sdata.get("content")
+                    or sdata.get("messages")
+                )
+                if current_depth + 1 < max_depth and isinstance(nested, list) and nested and budget[0] > 1:
+                    # Reserve 1 slot for this parent node before recursing
+                    budget[0] -= 1
+                    nested_children = flatten_forward_nodes(
+                        nested,
+                        alias_mapper=alias_mapper,
+                        pending_images=pending_images,
+                        plain_texts=plain_texts,
+                        forward_nodes_map=fmap,
+                        max_depth=max_depth,
+                        max_nodes=max_nodes,
+                        current_depth=current_depth + 1,
+                        node_budget=budget,
+                    )
+                    # Restore parent reservation so outer decrement stays exact
+                    budget[0] += 1
+                    if nested_children:
+                        content_parts.append(
+                            {
+                                "type": "forward_quote",
+                                "title": f"嵌套聊天记录 ({len(nested_children)}条)",
+                                "messages": nested_children,
+                            }
                         )
-                        if content_parts:
-                            messages.append(
-                                {
-                                    "sender_alias": alias,
-                                    "avatar_color_idx": color_idx,
-                                    "time_label": time_label,
-                                    "content": content_parts,
-                                }
-                            )
-                            content_parts = []
-                        for child in flattened_children:
-                            if len(messages) >= max_nodes:
-                                break
-                            messages.append(child)
                 else:
                     content_parts.append({"type": "text", "text": "[嵌套聊天记录已折叠]"})
 
-        if content_parts and len(messages) < max_nodes:
+        if content_parts and budget[0] > 0:
+            budget[0] -= 1
             messages.append(
                 {
                     "sender_alias": alias,
@@ -320,8 +328,8 @@ def desensitize_onebot_message(
     submitter_salt: str,
     forward_nodes_map: dict[str, list[dict[str, Any]]] | None = None,
     video_link_whitelist: list[str] | None = None,
-    max_chat_depth: int = 1,
-    max_chat_nodes: int = 20,
+    max_chat_depth: int = 3,
+    max_chat_nodes: int = 50,
     extra_tags: list[str] | None = None,
     origin_label: str = "官方投稿群",
 ) -> DesensitizedMessage:
@@ -401,6 +409,7 @@ def desensitize_onebot_message(
                     alias_mapper=alias_mapper,
                     pending_images=result.pending_images,
                     plain_texts=result.plain_texts,
+                    forward_nodes_map=forward_nodes_map,
                     max_depth=max_chat_depth,
                     max_nodes=max_chat_nodes,
                 )

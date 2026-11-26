@@ -198,8 +198,8 @@ async def test_full_stack_end_to_end_lifecycle(live_hub: LiveHubServer, tmp_path
         assert meta.capabilities.feedback is True
         assert meta.limits.max_image_bytes == 10_485_760
         assert meta.limits.max_gif_bytes == 5_242_880
-        assert meta.limits.max_chat_nodes == 20
-        assert meta.limits.max_chat_depth == 1
+        assert meta.limits.max_chat_nodes == 50
+        assert meta.limits.max_chat_depth == 3
 
         creds_1 = await hub_src_1.ensure_registered()
         assert creds_1["instance_id"]

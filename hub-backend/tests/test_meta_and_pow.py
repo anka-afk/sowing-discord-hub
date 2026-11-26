@@ -20,9 +20,9 @@ def test_healthz_and_meta(client):
     assert data["limits"] == {
         "max_image_bytes": 10485760,
         "max_gif_bytes": 5242880,
-        "max_images_per_submission": 9,
-        "max_chat_nodes": 20,
-        "max_chat_depth": 1,
+        "max_images_per_submission": 20,
+        "max_chat_nodes": 50,
+        "max_chat_depth": 3,
     }
     assert len(data["tags"]) > 0
 

@@ -163,93 +163,19 @@ def validate_and_normalize_blocks(
                     status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                     detail=f"Block #{idx} chat_record requires non-empty messages list",
                 )
-            if len(raw_msgs) > settings.max_chat_nodes:
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail=f"chat_record exceeds max_chat_nodes ({settings.max_chat_nodes})",
-                )
-            norm_msgs: list[dict[str, Any]] = []
-            for midx, msg in enumerate(raw_msgs):
-                if not isinstance(msg, dict):
-                    raise HTTPException(
-                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                        detail=f"chat_record message #{midx} must be an object",
-                    )
-                alias = str(msg.get("sender_alias", "")).strip() or f"群友{chr(65 + (midx % 26))}"
-                alias = alias[:64]
-                color_idx = int(msg.get("avatar_color_idx", midx % 8))
-                if color_idx < 0:
-                    color_idx = 0
-                time_label = str(msg.get("time_label", "") or "")[:32]
-                raw_content = msg.get("content")
-                if not isinstance(raw_content, list) or not raw_content:
-                    raise HTTPException(
-                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                        detail=f"chat_record message #{midx} requires non-empty content list",
-                    )
-                norm_content: list[dict[str, Any]] = []
-                for seg in raw_content:
-                    if not isinstance(seg, dict):
-                        raise HTTPException(
-                            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                            detail=f"Invalid segment in chat_record message #{midx}",
-                        )
-                    stype = seg.get("type")
-                    if stype == "chat_record":
-                        raise HTTPException(
-                            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                            detail=f"Nested chat_record forbidden (max_chat_depth={settings.max_chat_depth})",
-                        )
-                    if stype == "text":
-                        stext = str(seg.get("text", "")).strip()
-                        if stext:
-                            norm_content.append({"type": "text", "text": stext[:2000]})
-                            hash_parts.append(f"chat:{alias}:{stext}")
-                    elif stype in ("image", "gif"):
-                        cmid = seg.get("media_id")
-                        if not cmid or not isinstance(cmid, str):
-                            raise HTTPException(
-                                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                                detail=f"chat_record inline image requires media_id (no external URLs)",
-                            )
-                        image_count += 1
-                        if image_count > settings.max_images_per_submission:
-                            raise HTTPException(
-                                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                                detail=f"Too many images: maximum {settings.max_images_per_submission} per submission",
-                            )
-                        mrow = _fetch_media_row(conn, cmid)
-                        media_ids.append(cmid)
-                        hash_parts.append(f"chat_img:{mrow['sha256']}")
-                        norm_content.append(
-                            {
-                                "type": "gif" if mrow["mime_type"] == "image/gif" else "image",
-                                "media_id": cmid,
-                                "url": mrow["url"] or f"/api/v1/admin/media/{cmid}",
-                                "mime": mrow["mime_type"],
-                                "w": int(mrow["w"]),
-                                "h": int(mrow["h"]),
-                                "size_bytes": int(mrow["size_bytes"]),
-                            }
-                        )
-                    else:
-                        raise HTTPException(
-                            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                            detail=f"Unsupported chat_record content segment type: {stype}",
-                        )
-                if not norm_content:
-                    raise HTTPException(
-                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                        detail=f"chat_record message #{midx} has no valid content",
-                    )
-                norm_msgs.append(
-                    {
-                        "sender_alias": alias,
-                        "avatar_color_idx": color_idx,
-                        "time_label": time_label,
-                        "content": norm_content,
-                    }
-                )
+            node_counter = [0]
+            img_counter = [image_count]
+            norm_msgs = _normalize_chat_messages(
+                raw_msgs,
+                conn,
+                settings,
+                depth=0,
+                node_counter=node_counter,
+                img_counter=img_counter,
+                media_ids=media_ids,
+                hash_parts=hash_parts,
+            )
+            image_count = img_counter[0]
             normalized.append(
                 {
                     "type": "chat_record",
@@ -326,6 +252,153 @@ def validate_and_normalize_blocks(
     return normalized, list(dict.fromkeys(media_ids)), content_type, content_hash
 
 
+def _normalize_chat_messages(
+    raw_msgs: list[Any],
+    conn: sqlite3.Connection,
+    settings: Settings,
+    *,
+    depth: int,
+    node_counter: list[int],
+    img_counter: list[int],
+    media_ids: list[str],
+    hash_parts: list[str],
+) -> list[dict[str, Any]]:
+    norm_msgs: list[dict[str, Any]] = []
+    for midx, msg in enumerate(raw_msgs):
+        node_counter[0] += 1
+        if node_counter[0] > settings.max_chat_nodes:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"chat_record exceeds max_chat_nodes ({settings.max_chat_nodes})",
+            )
+        if not isinstance(msg, dict):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"chat_record message #{midx} must be an object",
+            )
+        alias = str(msg.get("sender_alias", "")).strip() or f"群友{chr(65 + (midx % 26))}"
+        alias = alias[:64]
+        color_idx = int(msg.get("avatar_color_idx", midx % 8))
+        if color_idx < 0:
+            color_idx = 0
+        time_label = str(msg.get("time_label", "") or "")[:32]
+        raw_content = msg.get("content")
+        if not isinstance(raw_content, list) or not raw_content:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"chat_record message #{midx} requires non-empty content list",
+            )
+        norm_content: list[dict[str, Any]] = []
+        for seg in raw_content:
+            if not isinstance(seg, dict):
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"Invalid segment in chat_record message #{midx}",
+                )
+            stype = seg.get("type")
+            if stype == "chat_record":
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"Nested chat_record forbidden; use forward_quote (max_chat_depth={settings.max_chat_depth})",
+                )
+            if stype == "text":
+                stext = str(seg.get("text", "")).strip()
+                if stext:
+                    norm_content.append({"type": "text", "text": stext[:2000]})
+                    hash_parts.append(f"chat:{alias}:{stext}")
+            elif stype in ("image", "gif"):
+                cmid = seg.get("media_id")
+                if not cmid or not isinstance(cmid, str):
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail="chat_record inline image requires media_id (no external URLs)",
+                    )
+                img_counter[0] += 1
+                if img_counter[0] > settings.max_images_per_submission:
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail=f"Too many images: maximum {settings.max_images_per_submission} per submission",
+                    )
+                mrow = _fetch_media_row(conn, cmid)
+                media_ids.append(cmid)
+                hash_parts.append(f"chat_img:{mrow['sha256']}")
+                norm_content.append(
+                    {
+                        "type": "gif" if mrow["mime_type"] == "image/gif" else "image",
+                        "media_id": cmid,
+                        "url": mrow["url"] or f"/api/v1/admin/media/{cmid}",
+                        "mime": mrow["mime_type"],
+                        "w": int(mrow["w"]),
+                        "h": int(mrow["h"]),
+                        "size_bytes": int(mrow["size_bytes"]),
+                    }
+                )
+            elif stype == "forward_quote":
+                nested_msgs = seg.get("messages")
+                if not isinstance(nested_msgs, list) or not nested_msgs:
+                    continue
+                if depth + 1 >= settings.max_chat_depth:
+                    norm_content.append({"type": "text", "text": "[嵌套聊天记录已达上限]"})
+                    continue
+                qtitle = str(seg.get("title") or "聊天记录").strip()[:80]
+                norm_nested = _normalize_chat_messages(
+                    nested_msgs,
+                    conn,
+                    settings,
+                    depth=depth + 1,
+                    node_counter=node_counter,
+                    img_counter=img_counter,
+                    media_ids=media_ids,
+                    hash_parts=hash_parts,
+                )
+                if norm_nested:
+                    norm_content.append(
+                        {
+                            "type": "forward_quote",
+                            "title": qtitle,
+                            "messages": norm_nested,
+                        }
+                    )
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"Unsupported chat_record content segment type: {stype}",
+                )
+        if not norm_content:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"chat_record message #{midx} has no valid content",
+            )
+        norm_msgs.append(
+            {
+                "sender_alias": alias,
+                "avatar_color_idx": color_idx,
+                "time_label": time_label,
+                "content": norm_content,
+            }
+        )
+    return norm_msgs
+
+
+def _extract_chat_plain_texts(messages: list[dict[str, Any]], parts: list[str]) -> None:
+    for msg in messages:
+        alias = str(msg.get("sender_alias") or "").strip()
+        msg_texts: list[str] = []
+        nested_quotes: list[list[dict[str, Any]]] = []
+        for seg in msg.get("content") or []:
+            if seg.get("type") == "text" and seg.get("text"):
+                msg_texts.append(str(seg.get("text", "")).strip())
+            elif seg.get("type") == "forward_quote" and isinstance(seg.get("messages"), list):
+                nested_quotes.append(seg["messages"])
+        if msg_texts:
+            joined = " ".join(msg_texts)
+            parts.append(f"{alias}: {joined}" if alias else joined)
+        elif alias and not nested_quotes:
+            parts.append(alias)
+        for nq in nested_quotes:
+            _extract_chat_plain_texts(nq, parts)
+
+
 def extract_plain_texts(title: str, blocks: list[dict[str, Any]]) -> list[str]:
     parts: list[str] = []
     if title:
@@ -337,18 +410,7 @@ def extract_plain_texts(title: str, blocks: list[dict[str, Any]]) -> list[str]:
         elif btype == "video_link" and blk.get("title"):
             parts.append(str(blk["title"]).strip())
         elif btype == "chat_record":
-            for msg in blk.get("messages") or []:
-                alias = str(msg.get("sender_alias") or "").strip()
-                msg_texts = [
-                    str(seg.get("text", "")).strip()
-                    for seg in (msg.get("content") or [])
-                    if seg.get("type") == "text" and seg.get("text")
-                ]
-                if msg_texts:
-                    joined = " ".join(msg_texts)
-                    parts.append(f"{alias}: {joined}" if alias else joined)
-                elif alias:
-                    parts.append(alias)
+            _extract_chat_plain_texts(blk.get("messages") or [], parts)
     return [p for p in parts if p]
 
 
@@ -370,6 +432,22 @@ def build_auto_summary(title: str, blocks: list[dict[str, Any]], max_len: int = 
     if len(combined) <= max_len:
         return combined
     return combined[:max_len]
+
+
+def _strip_chat_media_ids(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    msgs: list[dict[str, Any]] = []
+    for m in messages:
+        mcopy = dict(m)
+        new_content: list[dict[str, Any]] = []
+        for seg in m.get("content") or []:
+            scopy = dict(seg)
+            scopy.pop("media_id", None)
+            if scopy.get("type") == "forward_quote" and isinstance(scopy.get("messages"), list):
+                scopy["messages"] = _strip_chat_media_ids(scopy["messages"])
+            new_content.append(scopy)
+        mcopy["content"] = new_content
+        msgs.append(mcopy)
+    return msgs
 
 
 def serialize_meme_item(
@@ -401,17 +479,7 @@ def serialize_meme_item(
                     rcopy.pop("media_id", None)
                     rendered.append(rcopy)
                 b["rendered_images"] = rendered
-                msgs = []
-                for m in b.get("messages") or []:
-                    mcopy = dict(m)
-                    new_content = []
-                    for seg in m.get("content") or []:
-                        scopy = dict(seg)
-                        scopy.pop("media_id", None)
-                        new_content.append(scopy)
-                    mcopy["content"] = new_content
-                    msgs.append(mcopy)
-                b["messages"] = msgs
+                b["messages"] = _strip_chat_media_ids(b.get("messages") or [])
         blocks.append(b)
 
     web_base = settings.web_base_url.rstrip("/")

@@ -39,14 +39,23 @@ export interface ChatContentPartText {
 }
 
 export interface ChatContentPartImage {
-  type: 'image';
+  type: 'image' | 'gif';
   url?: string;
   media_id?: string;
   w?: number;
   h?: number;
 }
 
-export type ChatContentPart = ChatContentPartText | ChatContentPartImage;
+export interface ChatContentPartForwardQuote {
+  type: 'forward_quote';
+  title?: string;
+  messages: ChatMessageNode[];
+}
+
+export type ChatContentPart =
+  | ChatContentPartText
+  | ChatContentPartImage
+  | ChatContentPartForwardQuote;
 
 export interface ChatMessageNode {
   sender_alias: string;

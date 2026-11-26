@@ -102,9 +102,9 @@ class Settings(BaseSettings):
     max_image_dimension: int = 1920
     max_image_pixels: int = 40_000_000  # anti decompression bomb
     max_gif_frames: int = 300
-    max_images_per_submission: int = 9
-    max_chat_nodes: int = 20
-    max_chat_depth: int = 1
+    max_images_per_submission: int = 20
+    max_chat_nodes: int = 50
+    max_chat_depth: int = 3
     phash_similar_threshold: int = 8
 
     # Feedback & circuit breaker

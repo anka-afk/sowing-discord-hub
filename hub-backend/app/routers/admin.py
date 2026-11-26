@@ -469,22 +469,27 @@ def review_item(
                     rendered_objs.append(promoted)
                 b["rendered_images"] = rendered_objs
 
-                # Also promote inline images inside chat_record messages
-                new_msgs = []
-                for msg in b.get("messages") or []:
-                    mcopy = dict(msg)
-                    new_content = []
-                    for seg in mcopy.get("content") or []:
-                        scopy = dict(seg)
-                        if scopy.get("type") in ("image", "gif") and scopy.get("media_id"):
-                            promoted = _promote_media_to_public(
-                                conn, storage, scopy["media_id"], item_id
-                            )
-                            scopy.update(promoted)
-                        new_content.append(scopy)
-                    mcopy["content"] = new_content
-                    new_msgs.append(mcopy)
-                b["messages"] = new_msgs
+                # Also promote inline images recursively inside chat_record messages & forward_quote
+                def _promote_chat_msgs(msg_list: list[dict[str, Any]]) -> list[dict[str, Any]]:
+                    out_msgs: list[dict[str, Any]] = []
+                    for msg in msg_list:
+                        mcopy = dict(msg)
+                        new_content: list[dict[str, Any]] = []
+                        for seg in mcopy.get("content") or []:
+                            scopy = dict(seg)
+                            if scopy.get("type") in ("image", "gif") and scopy.get("media_id"):
+                                promoted = _promote_media_to_public(
+                                    conn, storage, scopy["media_id"], item_id
+                                )
+                                scopy.update(promoted)
+                            elif scopy.get("type") == "forward_quote" and isinstance(scopy.get("messages"), list):
+                                scopy["messages"] = _promote_chat_msgs(scopy["messages"])
+                            new_content.append(scopy)
+                        mcopy["content"] = new_content
+                        out_msgs.append(mcopy)
+                    return out_msgs
+
+                b["messages"] = _promote_chat_msgs(b.get("messages") or [])
 
             updated_blocks.append(b)
 

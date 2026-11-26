@@ -84,7 +84,22 @@ export interface MeasuredImagePart {
   image?: LoadedImageInfo;
 }
 
-export type MeasuredPart = MeasuredTextPart | MeasuredImagePart;
+export interface MeasuredForwardQuoteItem {
+  alias: string;
+  timeLabel?: string;
+  parts: MeasuredPart[];
+  height: number;
+}
+
+export interface MeasuredForwardQuotePart {
+  type: 'forward_quote';
+  title: string;
+  items: MeasuredForwardQuoteItem[];
+  width: number;
+  height: number;
+}
+
+export type MeasuredPart = MeasuredTextPart | MeasuredImagePart | MeasuredForwardQuotePart;
 
 export interface MeasuredBubble {
   index: number;
@@ -204,28 +219,18 @@ export function fitInlineImageDimensions(
   };
 }
 
-/**
- * Measure a single chat message node without drawing to canvas.
- */
-export function measureBubble(
-  node: ChatMessageNode,
-  index: number,
+function measureContentParts(
+  parts: ChatContentPart[],
+  maxInnerWidth: number,
   measureTextWidth: (str: string) => number,
   loadedImages: Map<string, LoadedImageInfo>,
   resolveKey: (part: { url?: string; media_id?: string }) => string,
-  layout: ChatRenderLayoutConfig = DEFAULT_CHAT_LAYOUT,
-): MeasuredBubble {
-  const maxBubbleOuterWidth =
-    layout.canvasWidth - layout.paddingX * 2 - layout.avatarSize - layout.avatarGap - 16;
-  const maxInnerWidth = maxBubbleOuterWidth - layout.bubblePadX * 2;
-
+  layout: ChatRenderLayoutConfig,
+  depth = 0,
+): { measuredParts: MeasuredPart[]; maxContentW: number; totalContentH: number } {
   const measuredParts: MeasuredPart[] = [];
   let maxContentW = 0;
   let totalContentH = 0;
-
-  const parts: ChatContentPart[] = node.content?.length
-    ? node.content
-    : [{ type: 'text', text: '' }];
 
   for (let i = 0; i < parts.length; i++) {
     const part = parts[i];
@@ -249,7 +254,7 @@ export function measureBubble(
       });
       maxContentW = Math.max(maxContentW, partW);
       totalContentH += partH;
-    } else if (part.type === 'image') {
+    } else if (part.type === 'image' || part.type === 'gif') {
       const key = resolveKey(part);
       const loaded = key ? loadedImages.get(key) : undefined;
       const natW = loaded?.width || part.w || 360;
@@ -258,7 +263,7 @@ export function measureBubble(
         natW,
         natH,
         maxInnerWidth,
-        layout.maxInlineImageHeight,
+        depth > 0 ? Math.min(320, layout.maxInlineImageHeight) : layout.maxInlineImageHeight,
       );
       measuredParts.push({
         type: 'image',
@@ -270,8 +275,84 @@ export function measureBubble(
       });
       maxContentW = Math.max(maxContentW, fitted.width);
       totalContentH += fitted.height;
+    } else if (part.type === 'forward_quote' && Array.isArray(part.messages) && part.messages.length > 0 && depth < 3) {
+      const quotePadX = 14;
+      const quotePadY = 10;
+      const quoteHeaderH = 26;
+      const quoteInnerMaxW = Math.max(120, maxInnerWidth - quotePadX * 2 - 6);
+      const items: MeasuredForwardQuoteItem[] = [];
+      let itemsTotalH = 0;
+      let maxItemW = Math.min(quoteInnerMaxW, measureTextWidth(part.title || '嵌套聊天记录') + 12);
+
+      for (let mIdx = 0; mIdx < part.messages.length; mIdx++) {
+        const sub = part.messages[mIdx];
+        if (mIdx > 0) itemsTotalH += 10;
+        const subMeasured = measureContentParts(
+          sub.content?.length ? sub.content : [{ type: 'text', text: '' }],
+          quoteInnerMaxW,
+          measureTextWidth,
+          loadedImages,
+          resolveKey,
+          layout,
+          depth + 1,
+        );
+        const senderH = 22;
+        const itemH = senderH + subMeasured.totalContentH;
+        items.push({
+          alias: sub.sender_alias || '群友',
+          timeLabel: sub.time_label,
+          parts: subMeasured.measuredParts,
+          height: itemH,
+        });
+        maxItemW = Math.max(maxItemW, subMeasured.maxContentW, 120);
+        itemsTotalH += itemH;
+      }
+
+      const boxW = Math.min(maxInnerWidth, Math.ceil(maxItemW + quotePadX * 2 + 6));
+      const boxH = Math.ceil(quotePadY * 2 + quoteHeaderH + itemsTotalH);
+      measuredParts.push({
+        type: 'forward_quote',
+        title: part.title || `嵌套聊天记录 (${part.messages.length}条)`,
+        items,
+        width: boxW,
+        height: boxH,
+      });
+      maxContentW = Math.max(maxContentW, boxW);
+      totalContentH += boxH;
     }
   }
+
+  return { measuredParts, maxContentW, totalContentH };
+}
+
+/**
+ * Measure a single chat message node without drawing to canvas.
+ */
+export function measureBubble(
+  node: ChatMessageNode,
+  index: number,
+  measureTextWidth: (str: string) => number,
+  loadedImages: Map<string, LoadedImageInfo>,
+  resolveKey: (part: { url?: string; media_id?: string }) => string,
+  layout: ChatRenderLayoutConfig = DEFAULT_CHAT_LAYOUT,
+): MeasuredBubble {
+  const maxBubbleOuterWidth =
+    layout.canvasWidth - layout.paddingX * 2 - layout.avatarSize - layout.avatarGap - 16;
+  const maxInnerWidth = maxBubbleOuterWidth - layout.bubblePadX * 2;
+
+  const parts: ChatContentPart[] = node.content?.length
+    ? node.content
+    : [{ type: 'text', text: '' }];
+
+  const { measuredParts, maxContentW, totalContentH } = measureContentParts(
+    parts,
+    maxInnerWidth,
+    measureTextWidth,
+    loadedImages,
+    resolveKey,
+    layout,
+    0,
+  );
 
   const bubbleWidth = Math.min(
     maxBubbleOuterWidth,
@@ -427,16 +508,21 @@ export async function renderChatRecordToSlices(
     options.resolveImageUrl ?? ((part) => part.url || '');
   const imageLoader = options.loadImage ?? defaultLoadImage;
 
-  // 1. Collect & preload all unique inline images
+  // 1. Collect & preload all unique inline images recursively (including inside forward_quote)
   const uniqueUrls = new Set<string>();
-  for (const msg of messages) {
-    for (const part of msg.content ?? []) {
-      if (part.type === 'image') {
-        const u = resolveUrl(part);
-        if (u) uniqueUrls.add(u);
+  const collectImages = (msgList: ChatMessageNode[]) => {
+    for (const msg of msgList) {
+      for (const part of msg.content ?? []) {
+        if (part.type === 'image' || part.type === 'gif') {
+          const u = resolveUrl(part);
+          if (u) uniqueUrls.add(u);
+        } else if (part.type === 'forward_quote' && Array.isArray(part.messages)) {
+          collectImages(part.messages);
+        }
       }
     }
-  }
+  };
+  collectImages(messages);
 
   const loadedImages = new Map<string, LoadedImageInfo>();
   await Promise.all(
@@ -601,46 +687,88 @@ export async function renderChatRecordToSlices(
       ctx.lineWidth = 1;
       ctx.stroke();
 
-      // Bubble Content Parts
-      let innerY = bubbleY + layout.bubblePadY;
-      const innerX = contentStartX + layout.bubblePadX;
+      // Bubble Content Parts (recursive helper for forward_quote)
+      const drawMeasuredParts = (partsList: MeasuredPart[], startX: number, startY: number): number => {
+        let y = startY;
+        for (let i = 0; i < partsList.length; i++) {
+          if (i > 0) y += layout.partGap;
+          const part = partsList[i];
 
-      for (let i = 0; i < bubble.parts.length; i++) {
-        if (i > 0) innerY += layout.partGap;
-        const part = bubble.parts[i];
+          if (part.type === 'text') {
+            ctx.font = `400 ${layout.fontSize}px ${CHAT_FONT_FAMILY}`;
+            ctx.fillStyle = palette.bubbleText;
+            ctx.textBaseline = 'top';
+            for (const line of part.lines) {
+              ctx.fillText(line, startX, y + 3);
+              y += layout.lineHeight;
+            }
+          } else if (part.type === 'image') {
+            ctx.save();
+            drawRoundedRect(ctx, startX, y, part.drawWidth, part.drawHeight, 10);
+            ctx.clip();
+            if (part.image?.element && !part.image.failed) {
+              ctx.drawImage(part.image.element, startX, y, part.drawWidth, part.drawHeight);
+            } else {
+              ctx.fillStyle = palette.placeholderBg;
+              ctx.fillRect(startX, y, part.drawWidth, part.drawHeight);
+              ctx.fillStyle = palette.placeholderText;
+              ctx.font = `500 14px ${CHAT_FONT_FAMILY}`;
+              ctx.textAlign = 'center';
+              ctx.textBaseline = 'middle';
+              ctx.fillText(
+                '图片加载失败',
+                startX + part.drawWidth / 2,
+                y + part.drawHeight / 2,
+              );
+              ctx.textAlign = 'left';
+            }
+            ctx.restore();
+            y += part.drawHeight;
+          } else if (part.type === 'forward_quote') {
+            ctx.save();
+            drawRoundedRect(ctx, startX, y, part.width, part.height, 10);
+            ctx.fillStyle = isDark ? 'rgba(129, 140, 248, 0.08)' : '#f8f9fc';
+            ctx.fill();
+            ctx.strokeStyle = palette.bubbleBorder;
+            ctx.lineWidth = 1;
+            ctx.stroke();
+            // Left indigo accent bar
+            drawRoundedRect(ctx, startX, y, 4, part.height, 2);
+            ctx.fillStyle = '#4f46e5';
+            ctx.fill();
+            ctx.restore();
 
-        if (part.type === 'text') {
-          ctx.font = `400 ${layout.fontSize}px ${CHAT_FONT_FAMILY}`;
-          ctx.fillStyle = palette.bubbleText;
-          ctx.textBaseline = 'top';
-          for (const line of part.lines) {
-            ctx.fillText(line, innerX, innerY + 3);
-            innerY += layout.lineHeight;
+            let qy = y + 10;
+            const qx = startX + 14 + 4;
+            ctx.font = `600 13px ${CHAT_FONT_FAMILY}`;
+            ctx.fillStyle = isDark ? '#a5b4fc' : '#4f46e5';
+            ctx.textBaseline = 'top';
+            ctx.fillText(part.title, qx, qy + 2);
+            qy += 26;
+
+            for (let mIdx = 0; mIdx < part.items.length; mIdx++) {
+              if (mIdx > 0) qy += 10;
+              const sub = part.items[mIdx];
+              ctx.font = `600 13px ${CHAT_FONT_FAMILY}`;
+              ctx.fillStyle = palette.sender;
+              ctx.textBaseline = 'top';
+              ctx.fillText(sub.alias, qx, qy);
+              if (sub.timeLabel) {
+                const aw = ctx.measureText(sub.alias).width;
+                ctx.font = `400 11px ${CHAT_FONT_FAMILY}`;
+                ctx.fillStyle = palette.time;
+                ctx.fillText(sub.timeLabel, qx + aw + 8, qy + 1);
+              }
+              qy += 22;
+              qy = drawMeasuredParts(sub.parts, qx, qy);
+            }
+            y += part.height;
           }
-        } else if (part.type === 'image') {
-          ctx.save();
-          drawRoundedRect(ctx, innerX, innerY, part.drawWidth, part.drawHeight, 10);
-          ctx.clip();
-          if (part.image?.element && !part.image.failed) {
-            ctx.drawImage(part.image.element, innerX, innerY, part.drawWidth, part.drawHeight);
-          } else {
-            ctx.fillStyle = palette.placeholderBg;
-            ctx.fillRect(innerX, innerY, part.drawWidth, part.drawHeight);
-            ctx.fillStyle = palette.placeholderText;
-            ctx.font = `500 14px ${CHAT_FONT_FAMILY}`;
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'middle';
-            ctx.fillText(
-              '图片加载失败',
-              innerX + part.drawWidth / 2,
-              innerY + part.drawHeight / 2,
-            );
-            ctx.textAlign = 'left';
-          }
-          ctx.restore();
-          innerY += part.drawHeight;
         }
-      }
+        return y;
+      };
+
+      drawMeasuredParts(bubble.parts, contentStartX + layout.bubblePadX, bubbleY + layout.bubblePadY);
 
       cursorY += bubble.totalHeight + layout.bubbleGap;
     }

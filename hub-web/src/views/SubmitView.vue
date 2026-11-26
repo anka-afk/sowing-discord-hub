@@ -60,7 +60,7 @@ interface EditableChatRow {
   images: Array<{ media_id: string; previewUrl: string; w?: number; h?: number }>;
 }
 
-const MAX_CHAT_NODES = 20;
+const MAX_CHAT_NODES = 50;
 const PRESET_TAGS = ['沙雕', '群聊日常', '地狱笑话', '二次元', '抽象', '科技', '游戏', '猫猫'];
 
 const toast = useToast();
@@ -419,11 +419,15 @@ function buildSubmissionBlocks(): ContentBlock[] | null {
         sender_alias: m.sender_alias,
         avatar_color_idx: m.avatar_color_idx,
         time_label: m.time_label,
-        content: m.content.map((p) =>
-          p.type === 'image'
-            ? { type: 'image', media_id: p.media_id, w: p.w, h: p.h }
-            : { type: 'text', text: p.text },
-        ),
+        content: m.content.map((p): ChatContentPart => {
+          if (p.type === 'text') {
+            return { type: 'text', text: p.text };
+          }
+          if (p.type === 'forward_quote') {
+            return p;
+          }
+          return { type: p.type, media_id: p.media_id, w: p.w, h: p.h };
+        }),
       })),
     });
     return blocks;

@@ -90,17 +90,36 @@ class CollectorPipeline:
         if not segments:
             return ProcessOutcome(accepted=False, reason="empty_message")
 
-        # Resolve any top-level forward segments via get_forward_msg
+        # Recursively resolve forward segments via get_forward_msg (up to max_chat_depth)
         forward_nodes_map: dict[str, list[dict[str, Any]]] = {}
-        for seg in segments:
-            if seg.get("type") == "forward":
+
+        async def _prefetch_forwards(seg_list: list[dict[str, Any]], depth: int) -> None:
+            if depth >= self.config.filters.max_chat_depth or not self._get_forward_msg:
+                return
+            for seg in seg_list:
+                if not isinstance(seg, dict) or seg.get("type") != "forward":
+                    continue
                 sdata = seg.get("data", {}) if isinstance(seg.get("data"), dict) else {}
                 fid = str(sdata.get("id") or "")
-                if fid and not (sdata.get("content") or sdata.get("messages")) and self._get_forward_msg:
+                nodes = sdata.get("content") or sdata.get("messages")
+                if fid and not nodes and fid not in forward_nodes_map:
                     try:
-                        forward_nodes_map[fid] = await self._get_forward_msg(fid)
+                        nodes = await self._get_forward_msg(fid)
+                        forward_nodes_map[fid] = nodes
                     except Exception as exc:
-                        logger.warning("Failed to fetch forward msg %s: %s", fid, exc)
+                        logger.warning("Failed to fetch forward msg %s (depth=%d): %s", fid, depth, exc)
+                        continue
+                if isinstance(nodes, list) and depth + 1 < self.config.filters.max_chat_depth:
+                    for node in nodes:
+                        if not isinstance(node, dict):
+                            continue
+                        ndata = node.get("data", node)
+                        if not isinstance(ndata, dict):
+                            continue
+                        raw_c = ndata.get("content") if "content" in ndata else ndata.get("message", [])
+                        await _prefetch_forwards(normalize_segments(raw_c), depth + 1)
+
+        await _prefetch_forwards(segments, 0)
 
         # 2. Pre-desensitize & intercept video files
         try:

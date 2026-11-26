@@ -44,9 +44,9 @@ class FilterConfig:
     max_text_length: int = 4000
     max_image_bytes: int = 10_485_760
     max_gif_bytes: int = 5_242_880
-    max_images_per_submission: int = 9
-    max_chat_nodes: int = 20
-    max_chat_depth: int = 1
+    max_images_per_submission: int = 20
+    max_chat_nodes: int = 50
+    max_chat_depth: int = 3
     phash_hamming_threshold: int = 8
     video_link_whitelist: list[str] = field(
         default_factory=lambda: [
