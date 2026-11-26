@@ -1,0 +1,16 @@
+# Litestream real-time incremental SQLite backup to Cloudflare R2
+# Requires R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME, R2_ENDPOINT_URL
+dbs:
+  - path: /data/hub.db
+    replicas:
+      - type: s3
+        bucket: ${R2_BUCKET_NAME}
+        path: backups/hub.db
+        endpoint: ${R2_ENDPOINT_URL}
+        region: auto
+        access-key-id: ${R2_ACCESS_KEY_ID}
+        secret-access-key: ${R2_SECRET_ACCESS_KEY}
+        sync-interval: 10s
+        snapshot-interval: 24h
+        retention: 168h
+        force-path-style: true

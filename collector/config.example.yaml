@@ -1,0 +1,64 @@
+# AstrBot Sowing Discord v2 — 单官方号投稿群采集器配置示例
+# 复制为 config.yaml 后按实际环境修改（亦支持环境变量覆盖）
+
+log_level: INFO
+
+hub:
+  # sowing-discord-hub 后端地址
+  base_url: "http://127.0.0.1:8000"
+  # 与 hub-backend 环境变量 COLLECTOR_HMAC_SECRET 保持一致
+  shared_secret: "replace-with-strong-hmac-secret"
+  # 本地加盐 HMAC 盐值（仅用于匿名化 submitter_hash，绝不上报明文 QQ 号）
+  submitter_salt: "replace-with-random-salt"
+  timeout_sec: 20.0
+  max_retries: 2
+
+onebot:
+  # 单个官方号的 OneBot v11 正向 WebSocket 地址（如 NapCat / LLOneBot）
+  ws_url: "ws://127.0.0.1:3001"
+  access_token: ""
+  # 仅监听指定的官方投稿群号；留空则监听所有群
+  watch_groups:
+    - 123456789
+  reconnect_interval_sec: 5.0
+  action_timeout_sec: 15.0
+
+triggers:
+  # 群表情回应（group_msg_emoji_like）达到该净赞数自动触发初筛
+  emoji_like_threshold: 5
+  # 监听群精华（notice.essence）自动触发初筛
+  enable_essence: true
+  # 监听群消息 #投稿 前缀（支持直接附带内容或引用他人消息回复 #投稿）
+  enable_hashtag: true
+  hashtag_prefixes:
+    - "#投稿"
+
+filters:
+  # 免费本地前置敏感词表（基于 AC 自动机 O(n) 匹配）
+  sensitive_words:
+    - "违禁词示例"
+    - "广告引流示例"
+  # 可选外部敏感词文件路径（每行一个词，# 开头为注释）
+  sensitive_words_file: ""
+  min_text_length: 2
+  max_text_length: 4000
+  max_image_bytes: 10485760   # 10MB
+  max_gif_bytes: 5242880      # 5MB
+  max_images_per_submission: 9
+  max_chat_nodes: 20
+  max_chat_depth: 1
+  # pHash 汉明距离阈值（<= 8 视为视觉相似重复）
+  phash_hamming_threshold: 8
+  video_link_whitelist:
+    - "bilibili.com"
+    - "b23.tv"
+    - "youtube.com"
+    - "youtu.be"
+    - "douyin.com"
+    - "v.douyin.com"
+    - "tiktok.com"
+    - "x.com"
+    - "twitter.com"
+
+storage:
+  db_path: "./data/collector.db"

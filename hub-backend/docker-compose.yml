@@ -1,0 +1,60 @@
+services:
+  hub-api:
+    build: .
+    container_name: sowing-discord-hub-api
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - DATABASE_PATH=/data/hub.db
+      - LOCAL_STORAGE_DIR=/data/media
+    volumes:
+      - hub-data:/data
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # Optional Litestream real-time SQLite -> Cloudflare R2 replica
+  litestream:
+    image: litestream/litestream:0.3
+    container_name: sowing-discord-litestream
+    restart: unless-stopped
+    profiles:
+      - production
+    env_file:
+      - .env
+    volumes:
+      - hub-data:/data
+      - ./litestream.yml:/etc/litestream.yml:ro
+    command: ["replicate", "-config", "/etc/litestream.yml"]
+    depends_on:
+      - hub-api
+
+  # Optional Caddy reverse proxy with automatic HTTPS
+  caddy:
+    image: caddy:2-alpine
+    container_name: sowing-discord-caddy
+    restart: unless-stopped
+    profiles:
+      - caddy
+      - production
+    env_file:
+      - .env
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - hub-api
+
+volumes:
+  hub-data:
+  caddy-data:
+  caddy-config:

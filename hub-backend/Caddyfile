@@ -1,0 +1,4 @@
+{$API_DOMAIN:api.banshi.ankaanka.org} {
+    encode zstd gzip
+    reverse_proxy hub-api:8000
+}
