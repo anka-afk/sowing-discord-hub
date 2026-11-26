@@ -127,6 +127,27 @@ describe('chatRenderer pagination engine', () => {
     expect(seenIndices).toEqual(Array.from({ length: 16 }, (_, i) => i));
   });
 
+  it('keeps tall phone screenshots crisp (684x1520 instead of tiny 216px postage stamp)', () => {
+    const node: ChatMessageNode = {
+      sender_alias: '群友A',
+      avatar_color_idx: 0,
+      content: [{ type: 'image', url: 'https://cdn.example/phone.webp', w: 864, h: 1920 }],
+    };
+    const loaded = new Map<string, LoadedImageInfo>([
+      ['https://cdn.example/phone.webp', { width: 864, height: 1920 }],
+    ]);
+    const measured = measureBubble(node, 0, fakeMeasure, loaded, (p) => p.url || '');
+    const imgPart = measured.parts[0];
+    expect(imgPart.type).toBe('image');
+    if (imgPart.type === 'image') {
+      expect(imgPart.drawWidth).toBeGreaterThanOrEqual(680);
+      expect(imgPart.drawHeight).toBe(1520);
+    }
+    const pages = paginateChatBubbles([measured], DEFAULT_CHAT_LAYOUT);
+    expect(pages).toHaveLength(1);
+    expect(pages[0].height).toBeLessThanOrEqual(CHAT_MAX_SLICE_HEIGHT);
+  });
+
   it('handles empty chat arrays gracefully', () => {
     const pages = paginateChatBubbles([], DEFAULT_CHAT_LAYOUT);
     expect(pages).toHaveLength(1);

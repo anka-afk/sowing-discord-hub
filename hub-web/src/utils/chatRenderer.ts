@@ -1,7 +1,7 @@
 import type { ChatMessageNode, ChatContentPart } from '@/types/api';
 
-export const CHAT_CANVAS_WIDTH = 720;
-export const CHAT_MAX_SLICE_HEIGHT = 1800;
+export const CHAT_CANVAS_WIDTH = 1080;
+export const CHAT_MAX_SLICE_HEIGHT = 1920;
 
 export const CHAT_FONT_FAMILY =
   '-apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", "Segoe UI", "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif';
@@ -43,22 +43,22 @@ export interface ChatRenderLayoutConfig {
 export const DEFAULT_CHAT_LAYOUT: ChatRenderLayoutConfig = {
   canvasWidth: CHAT_CANVAS_WIDTH,
   maxSliceHeight: CHAT_MAX_SLICE_HEIGHT,
-  paddingX: 28,
-  headerHeight: 62,
-  footerHeight: 42,
-  topPaddingAfterHeader: 20,
-  bottomPaddingBeforeFooter: 18,
-  bubbleGap: 18,
-  avatarSize: 44,
-  avatarGap: 14,
-  senderRowHeight: 24,
-  bubblePadX: 16,
-  bubblePadY: 12,
-  lineHeight: 28,
-  partGap: 10,
-  maxInlineImageHeight: 480,
-  fontSize: 18,
-  senderFontSize: 14,
+  paddingX: 32,
+  headerHeight: 72,
+  footerHeight: 46,
+  topPaddingAfterHeader: 24,
+  bottomPaddingBeforeFooter: 20,
+  bubbleGap: 22,
+  avatarSize: 52,
+  avatarGap: 16,
+  senderRowHeight: 28,
+  bubblePadX: 18,
+  bubblePadY: 14,
+  lineHeight: 34,
+  partGap: 12,
+  maxInlineImageHeight: 1520,
+  fontSize: 22,
+  senderFontSize: 16,
 };
 
 export interface LoadedImageInfo {
@@ -263,7 +263,7 @@ function measureContentParts(
         natW,
         natH,
         maxInnerWidth,
-        depth > 0 ? Math.min(320, layout.maxInlineImageHeight) : layout.maxInlineImageHeight,
+        depth > 0 ? Math.min(960, layout.maxInlineImageHeight) : layout.maxInlineImageHeight,
       );
       measuredParts.push({
         type: 'image',
@@ -593,6 +593,8 @@ export async function renderChatRecordToSlices(
     canvas.height = page.height;
     const ctx = canvas.getContext('2d');
     if (!ctx) throw new Error('Canvas 2D 上下文初始化失败');
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
 
     // Background
     ctx.fillStyle = palette.bg;
@@ -785,7 +787,7 @@ export async function renderChatRecordToSlices(
       ctx.textAlign = 'left';
     }
 
-    const { blob, mime } = await canvasToWebpBlob(canvas, options.quality ?? 0.86);
+    const { blob, mime } = await canvasToWebpBlob(canvas, options.quality ?? 0.90);
     slices.push({
       pageIndex: page.pageIndex,
       totalPages,

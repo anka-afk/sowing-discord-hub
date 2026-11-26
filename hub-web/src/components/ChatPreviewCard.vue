@@ -17,8 +17,17 @@ const props = withDefaults(
   },
 );
 
+const emit = defineEmits<{
+  (e: 'preview-image', url: string): void;
+}>();
+
 function resolveInlineImg(part: { url?: string; media_id?: string }) {
   return api.resolveMediaUrl(part.url, part.media_id, props.adminContext);
+}
+
+function handlePreviewImage(part: { url?: string; media_id?: string }) {
+  const url = resolveInlineImg(part);
+  if (url) emit('preview-image', url);
 }
 </script>
 
@@ -60,6 +69,7 @@ function resolveInlineImg(part: { url?: string; media_id?: string }) {
                   alt="聊天插图"
                   class="chat-inline-img"
                   loading="lazy"
+                  @click.stop="handlePreviewImage(part)"
                 />
               </div>
               <div v-else-if="part.type === 'forward_quote'" class="chat-nested-quote">
@@ -68,6 +78,7 @@ function resolveInlineImg(part: { url?: string; media_id?: string }) {
                   :title="part.title || '嵌套聊天记录'"
                   :admin-context="adminContext"
                   compact
+                  @preview-image="emit('preview-image', $event)"
                 />
               </div>
             </template>
@@ -194,14 +205,17 @@ function resolveInlineImg(part: { url?: string; media_id?: string }) {
 .chat-inline-img-wrap {
   border-radius: 8px;
   overflow: hidden;
-  max-width: 320px;
+  max-width: 440px;
 }
 
 .chat-inline-img {
-  max-height: 260px;
+  display: block;
+  max-height: 520px;
+  max-width: 100%;
   width: auto;
   border-radius: 8px;
   object-fit: contain;
+  cursor: zoom-in;
 }
 
 .chat-nested-quote {

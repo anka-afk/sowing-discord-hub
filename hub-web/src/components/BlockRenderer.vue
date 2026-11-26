@@ -66,7 +66,56 @@ function resolveUrl(url?: string, mediaId?: string) {
 
       <!-- Chat Record Block -->
       <div v-else-if="block.type === 'chat_record'" class="block-chat">
-        <template v-if="block.rendered_images && block.rendered_images.length > 0">
+        <!-- Prefer interactive high-res ChatPreviewCard (100% original inline images + lightbox zoom) -->
+        <template v-if="block.messages && block.messages.length > 0">
+          <ChatPreviewCard
+            :messages="block.messages"
+            :title="title"
+            :admin-context="adminContext"
+            :compact="compact"
+            @preview-image="lightboxUrl = $event"
+          />
+
+          <div
+            v-if="block.rendered_images && block.rendered_images.length > 0"
+            class="chat-toggle-row"
+          >
+            <button
+              type="button"
+              class="btn btn-sm btn-ghost"
+              @click="toggleChatStructured(idx)"
+            >
+              <ChevronUp v-if="expandedChatMap[idx]" :size="14" />
+              <ChevronDown v-else :size="14" />
+              {{
+                expandedChatMap[idx]
+                  ? '收起 Bot 合成切片图'
+                  : `查看 Bot 合成切片图 (${block.rendered_images.length} 张)`
+              }}
+            </button>
+          </div>
+
+          <div
+            v-if="expandedChatMap[idx] && block.rendered_images && block.rendered_images.length > 0"
+            class="slice-stack"
+          >
+            <div
+              v-for="(slice, sIdx) in block.rendered_images"
+              :key="sIdx"
+              class="slice-item"
+            >
+              <img
+                :src="resolveUrl(slice.url, slice.media_id)"
+                :alt="`聊天记录切片 ${sIdx + 1}`"
+                class="slice-img"
+                loading="lazy"
+                @click="lightboxUrl = resolveUrl(slice.url, slice.media_id)"
+              />
+            </div>
+          </div>
+        </template>
+
+        <template v-else-if="block.rendered_images && block.rendered_images.length > 0">
           <div class="slice-stack">
             <div
               v-for="(slice, sIdx) in block.rendered_images"
@@ -82,35 +131,6 @@ function resolveUrl(url?: string, mediaId?: string) {
               />
             </div>
           </div>
-
-          <div v-if="block.messages && block.messages.length > 0" class="chat-toggle-row">
-            <button
-              type="button"
-              class="btn btn-sm btn-ghost"
-              @click="toggleChatStructured(idx)"
-            >
-              <ChevronUp v-if="expandedChatMap[idx]" :size="14" />
-              <ChevronDown v-else :size="14" />
-              {{ expandedChatMap[idx] ? '收起结构化对话文本' : `展开结构化对话 (${block.messages.length} 条)` }}
-            </button>
-          </div>
-
-          <ChatPreviewCard
-            v-if="expandedChatMap[idx]"
-            :messages="block.messages"
-            :title="title"
-            :admin-context="adminContext"
-            compact
-          />
-        </template>
-
-        <template v-else>
-          <ChatPreviewCard
-            :messages="block.messages || []"
-            :title="title"
-            :admin-context="adminContext"
-            :compact="compact"
-          />
         </template>
       </div>
 
