@@ -32,6 +32,8 @@ class TriggerConfig:
     enable_essence: bool = True
     enable_hashtag: bool = True
     hashtag_prefixes: list[str] = field(default_factory=lambda: ["#投稿"])
+    ingest_all_group_messages: bool = False
+    ingest_all_min_text_without_media: int = 25
 
 
 @dataclass

@@ -103,7 +103,7 @@ class TriggerEngine:
         return None
 
     def _handle_group_message(self, event: dict[str, Any]) -> TriggerCandidate | None:
-        if not self.config.enable_hashtag:
+        if not self.config.enable_hashtag and not self.config.ingest_all_group_messages:
             return None
         group_id = event.get("group_id")
         if not self._is_watched_group(group_id):
@@ -139,33 +139,53 @@ class TriggerEngine:
             else:
                 break
 
-        if not any(first_text.startswith(p) for p in self.config.hashtag_prefixes):
-            return None
-
-        cleaned_segments, extra_tags = strip_hashtag_prefix(non_reply_segments, self.config.hashtag_prefixes)
         sender_id = event.get("user_id") or 0
 
-        # If replying to another message with just "#投稿 [#tag]", nominate the replied message
-        has_inline_payload = any(
-            (s.get("type") == "text" and str(s.get("data", {}).get("text", "")).strip())
-            or s.get("type") in ("image", "forward", "video")
-            for s in cleaned_segments
-        )
-        if reply_msg_id and not has_inline_payload:
+        if self.config.enable_hashtag and any(first_text.startswith(p) for p in self.config.hashtag_prefixes):
+            cleaned_segments, extra_tags = strip_hashtag_prefix(non_reply_segments, self.config.hashtag_prefixes)
+
+            # If replying to another message with just "#投稿 [#tag]", nominate the replied message
+            has_inline_payload = any(
+                (s.get("type") == "text" and str(s.get("data", {}).get("text", "")).strip())
+                or s.get("type") in ("image", "forward", "video")
+                for s in cleaned_segments
+            )
+            if reply_msg_id and not has_inline_payload:
+                return TriggerCandidate(
+                    trigger_source="hashtag",
+                    group_id=gid,
+                    message_id=reply_msg_id,
+                    sender_user_id=sender_id,
+                    inline_segments=None,
+                    extra_tags=extra_tags,
+                )
+
             return TriggerCandidate(
                 trigger_source="hashtag",
                 group_id=gid,
-                message_id=reply_msg_id,
+                message_id=str(msg_id),
                 sender_user_id=sender_id,
-                inline_segments=None,
+                inline_segments=cleaned_segments,
                 extra_tags=extra_tags,
             )
 
-        return TriggerCandidate(
-            trigger_source="hashtag",
-            group_id=gid,
-            message_id=str(msg_id),
-            sender_user_id=sender_id,
-            inline_segments=cleaned_segments,
-            extra_tags=extra_tags,
-        )
+        if self.config.ingest_all_group_messages:
+            has_media_or_forward = any(
+                s.get("type") in ("image", "forward") for s in non_reply_segments
+            )
+            plain_len = sum(
+                len(str(s.get("data", {}).get("text", "")).strip())
+                for s in non_reply_segments
+                if s.get("type") == "text"
+            )
+            if has_media_or_forward or plain_len >= self.config.ingest_all_min_text_without_media:
+                return TriggerCandidate(
+                    trigger_source="auto_group",
+                    group_id=gid,
+                    message_id=str(msg_id),
+                    sender_user_id=sender_id,
+                    inline_segments=non_reply_segments,
+                    extra_tags=[],
+                )
+
+        return None
