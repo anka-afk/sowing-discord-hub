@@ -5,7 +5,7 @@
 配套 [astrbot_sowing_discord v2](https://github.com/anka-afk/astrbot_sowing_discord/tree/v2) 的中心化公益内容站、极速人工审核台与单官方号投稿群初筛采集器。
 
 - **前端网站 & 键盘流审核台（推荐域名）**：`https://banshi.ankaanka.org`（Cloudflare Pages）
-- **后端 API（推荐域名）**：`https://api.banshi.ankaanka.org`（1C2G VPS + Docker + Caddy）
+- **后端 API（推荐域名）**：`https://banshi-api.ankaanka.org`（免费 Cloudflare Tunnel / 1C2G VPS + Caddy）
 - **R2 公开图床 CDN（推荐域名）**：`https://cdn.banshi.ankaanka.org`（Cloudflare R2，0 出站流量费）
 - **原发布页保留不变**：`https://sowingdiscord.ankaanka.org`
 
@@ -38,7 +38,7 @@ sowing-discord-hub/
 | Build command | `npm run build` |
 | Build output directory | `dist` |
 | 环境变量 `NODE_VERSION` | `22` |
-| 环境变量 `VITE_API_BASE_URL` | `https://api.banshi.ankaanka.org` |
+| 环境变量 `VITE_API_BASE_URL` | `https://banshi-api.ankaanka.org` |
 | 环境变量 `VITE_TURNSTILE_SITE_KEY` | *(可选，接入 Cloudflare Turnstile 后填入)* |
 
 部署完成后在 **Custom domains** 绑定 `banshi.ankaanka.org`。

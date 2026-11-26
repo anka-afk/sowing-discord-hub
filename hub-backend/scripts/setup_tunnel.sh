@@ -2,7 +2,7 @@
 set -euo pipefail
 
 TUNNEL_NAME="${TUNNEL_NAME:-sowing-discord-hub}"
-HOSTNAME="${API_HOSTNAME:-api.banshi.ankaanka.org}"
+HOSTNAME="${API_HOSTNAME:-banshi-api.ankaanka.org}"
 
 if [ ! -f /root/.cloudflared/cert.pem ]; then
   echo "ERROR: /root/.cloudflared/cert.pem not found! Please open the login URL and authorize first."

@@ -50,13 +50,13 @@ if [ ! -f "$ENV_FILE" ]; then
 HUB_ID=official-main
 HUB_NAME=Sowing Discord Hub
 WEB_BASE_URL=https://banshi.ankaanka.org
-API_BASE_URL=https://api.banshi.ankaanka.org
-API_DOMAIN=api.banshi.ankaanka.org
+API_BASE_URL=https://banshi-api.ankaanka.org
+API_DOMAIN=banshi-api.ankaanka.org
 
 DATABASE_PATH=/opt/sowing-discord-hub/data/hub.db
 STORAGE_BACKEND=local
 LOCAL_STORAGE_DIR=/opt/sowing-discord-hub/data/media
-PUBLIC_MEDIA_BASE_URL=https://api.banshi.ankaanka.org/media/public
+PUBLIC_MEDIA_BASE_URL=https://banshi-api.ankaanka.org/media/public
 STORAGE_LIMIT_BYTES=10737418240
 
 JWT_SECRET=${JWT_SEC}
