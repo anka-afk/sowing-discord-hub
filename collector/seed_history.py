@@ -121,7 +121,12 @@ async def seed_groups(config_path: str, per_group: int = 15, max_total_accepted:
                         inline_segments=segs,
                         extra_tags=[],
                     )
-                    outcome = await pipeline.process_candidate(candidate)
+                    try:
+                        outcome = await pipeline.process_candidate(candidate)
+                    except Exception as exc:
+                        logger.warning("Error seeding group=%s mid=%s: %s", gid, mid, exc)
+                        stats[f"error:{type(exc).__name__}"] += 1
+                        continue
                     if outcome.accepted:
                         stats["accepted"] += 1
                         if outcome.submission_id:

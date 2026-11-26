@@ -175,11 +175,15 @@ class CollectorPipeline:
                     duplicate_early_stop=True,
                 )
 
-            upload_resp = await self.hub_client.upload_media(
-                validated.data,
-                validated.filename,
-                validated.mime,
-            )
+            try:
+                upload_resp = await self.hub_client.upload_media(
+                    validated.data,
+                    validated.filename,
+                    validated.mime,
+                )
+            except Exception as exc:
+                logger.warning("Failed to upload media to Hub: %s", exc)
+                return ProcessOutcome(accepted=False, reason=f"hub_upload_failed:{type(exc).__name__}")
             if upload_resp.duplicate:
                 self.dedup.mark_media_seen(validated.sha256, validated.phash)
                 self.dedup.mark_message_seen(candidate.group_id, candidate.message_id, candidate.trigger_source)
@@ -209,7 +213,11 @@ class CollectorPipeline:
                 "origin_label": desensitized.origin_label,
             },
         }
-        resp = await self.hub_client.ingest_submission(payload)
+        try:
+            resp = await self.hub_client.ingest_submission(payload)
+        except Exception as exc:
+            logger.warning("Failed to ingest submission to Hub: %s", exc)
+            return ProcessOutcome(accepted=False, reason=f"hub_ingest_failed:{type(exc).__name__}")
 
         # Record in local dedup store only after successful ingest
         self.dedup.mark_message_seen(candidate.group_id, candidate.message_id, candidate.trigger_source)
