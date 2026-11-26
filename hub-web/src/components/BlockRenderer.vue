@@ -1,6 +1,15 @@
 <script setup lang="ts">
-import { ref } from 'vue';
-import { ChevronDown, ChevronUp, ExternalLink, Film, Image as ImageIcon, Play } from 'lucide-vue-next';
+import { onBeforeUnmount, onMounted, ref } from 'vue';
+import {
+  ChevronDown,
+  ChevronUp,
+  ExternalLink,
+  Film,
+  Maximize2,
+  Minimize2,
+  Play,
+  X,
+} from 'lucide-vue-next';
 import type { ContentBlock } from '@/types/api';
 import { api } from '@/api/client';
 import { formatDuration } from '@/utils/format';
@@ -21,6 +30,23 @@ const props = withDefaults(
 
 const expandedChatMap = ref<Record<number, boolean>>({});
 const lightboxUrl = ref<string | null>(null);
+const lightboxFullWidth = ref(false);
+
+function openLightbox(url: string) {
+  lightboxFullWidth.value = false;
+  lightboxUrl.value = url;
+}
+
+function closeLightbox() {
+  lightboxUrl.value = null;
+  lightboxFullWidth.value = false;
+}
+
+function onLightboxKeydown(e: KeyboardEvent) {
+  if (e.key === 'Escape' && lightboxUrl.value) {
+    closeLightbox();
+  }
+}
 
 function toggleChatStructured(idx: number) {
   expandedChatMap.value[idx] = !expandedChatMap.value[idx];
@@ -29,6 +55,14 @@ function toggleChatStructured(idx: number) {
 function resolveUrl(url?: string, mediaId?: string) {
   return api.resolveMediaUrl(url, mediaId, props.adminContext);
 }
+
+onMounted(() => {
+  window.addEventListener('keydown', onLightboxKeydown);
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onLightboxKeydown);
+});
 </script>
 
 <template>
@@ -47,7 +81,7 @@ function resolveUrl(url?: string, mediaId?: string) {
           class="media-img"
           :class="{ compact }"
           loading="lazy"
-          @click="lightboxUrl = resolveUrl(block.url, block.media_id)"
+          @click="openLightbox(resolveUrl(block.url, block.media_id))"
         />
       </figure>
 
@@ -60,7 +94,7 @@ function resolveUrl(url?: string, mediaId?: string) {
           class="media-img"
           :class="{ compact }"
           loading="lazy"
-          @click="lightboxUrl = resolveUrl(block.url, block.media_id)"
+          @click="openLightbox(resolveUrl(block.url, block.media_id))"
         />
       </figure>
 
@@ -73,7 +107,7 @@ function resolveUrl(url?: string, mediaId?: string) {
             :title="title"
             :admin-context="adminContext"
             :compact="compact"
-            @preview-image="lightboxUrl = $event"
+            @preview-image="openLightbox($event)"
           />
 
           <div
@@ -109,7 +143,7 @@ function resolveUrl(url?: string, mediaId?: string) {
                 :alt="`聊天记录切片 ${sIdx + 1}`"
                 class="slice-img"
                 loading="lazy"
-                @click="lightboxUrl = resolveUrl(slice.url, slice.media_id)"
+                @click="openLightbox(resolveUrl(slice.url, slice.media_id))"
               />
             </div>
           </div>
@@ -127,7 +161,7 @@ function resolveUrl(url?: string, mediaId?: string) {
                 :alt="`聊天记录切片 ${sIdx + 1}`"
                 class="slice-img"
                 loading="lazy"
-                @click="lightboxUrl = resolveUrl(slice.url, slice.media_id)"
+                @click="openLightbox(resolveUrl(slice.url, slice.media_id))"
               />
             </div>
           </div>
@@ -172,13 +206,42 @@ function resolveUrl(url?: string, mediaId?: string) {
       </a>
     </template>
 
-    <!-- Simple Lightbox -->
+    <!-- Enhanced Lightbox (Fit / Full-Width Scroll + Explicit Close) -->
     <Teleport to="body">
-      <div v-if="lightboxUrl" class="lightbox" @click="lightboxUrl = null">
-        <div class="lightbox-hint">
-          <ImageIcon :size="14" /> 点击任意位置关闭大图
+      <div
+        v-if="lightboxUrl"
+        class="lightbox"
+        :class="{ 'is-full': lightboxFullWidth }"
+        @click="closeLightbox"
+      >
+        <div class="lightbox-bar" @click.stop>
+          <button
+            type="button"
+            class="lightbox-ctrl"
+            @click="lightboxFullWidth = !lightboxFullWidth"
+          >
+            <Minimize2 v-if="lightboxFullWidth" :size="15" />
+            <Maximize2 v-else :size="15" />
+            <span>{{ lightboxFullWidth ? '适应屏幕' : '高清原宽' }}</span>
+          </button>
+          <button
+            type="button"
+            class="lightbox-ctrl lightbox-close"
+            aria-label="关闭大图"
+            @click="closeLightbox"
+          >
+            <X :size="16" />
+          </button>
         </div>
-        <img :src="lightboxUrl" alt="大图预览" class="lightbox-img" @click.stop />
+        <div class="lightbox-stage">
+          <img
+            :src="lightboxUrl"
+            alt="大图预览"
+            class="lightbox-img"
+            :class="{ 'is-full': lightboxFullWidth }"
+            @click.stop="lightboxFullWidth = !lightboxFullWidth"
+          />
+        </div>
       </div>
     </Teleport>
   </div>
@@ -369,42 +432,92 @@ function resolveUrl(url?: string, mediaId?: string) {
 .lightbox {
   position: fixed;
   inset: 0;
-  z-index: 120;
-  background: rgba(8, 11, 18, 0.88);
+  z-index: 140;
+  background: rgba(8, 11, 18, 0.92);
+  backdrop-filter: blur(6px);
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: 24px;
+  padding: 58px 16px 20px;
   cursor: zoom-out;
+  overflow: auto;
 }
 
-.lightbox-hint {
+.lightbox.is-full {
+  justify-content: flex-start;
+}
+
+.lightbox-bar {
   position: fixed;
-  top: 16px;
-  left: 50%;
-  transform: translateX(-50%);
+  top: 14px;
+  right: 16px;
+  z-index: 145;
   display: inline-flex;
   align-items: center;
+  gap: 8px;
+}
+
+.lightbox-ctrl {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   gap: 6px;
-  padding: 6px 14px;
+  height: 36px;
+  padding: 0 13px;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.14);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  background: rgba(15, 23, 42, 0.72);
   color: #f8fafc;
-  font-size: 12.5px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.lightbox-ctrl:hover {
+  background: rgba(30, 41, 59, 0.92);
+}
+
+.lightbox-close {
+  width: 36px;
+  padding: 0;
+}
+
+.lightbox-stage {
+  display: flex;
+  justify-content: center;
+  width: 100%;
 }
 
 .lightbox-img {
   max-width: 94vw;
-  max-height: 88vh;
+  max-height: calc(100vh - 88px);
   border-radius: 10px;
   box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
-  cursor: default;
+  cursor: zoom-in;
+}
+
+.lightbox-img.is-full {
+  max-height: none;
+  max-width: min(100%, 1080px);
+  width: auto;
+  height: auto;
+  cursor: zoom-out;
 }
 
 @media (max-width: 600px) {
   .video-card {
     grid-template-columns: 1fr;
+  }
+  .media-img.compact {
+    max-height: 420px;
+  }
+  .lightbox {
+    padding: 56px 10px 18px;
+  }
+  .lightbox-img {
+    max-width: 96vw;
   }
 }
 </style>

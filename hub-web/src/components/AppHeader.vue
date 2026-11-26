@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { useRoute } from 'vue-router';
-import { Flame, Moon, PlusCircle, ShieldCheck, Sun } from 'lucide-vue-next';
+import { Compass, Flame, Moon, PlusCircle, ShieldCheck, Sun } from 'lucide-vue-next';
 import { useTheme } from '@/composables/useTheme';
 import { useAuth } from '@/composables/useAuth';
 
@@ -24,6 +24,7 @@ const { isAuthenticated, user } = useAuth();
 
       <nav class="main-nav" aria-label="主导航">
         <RouterLink to="/" class="nav-link" :class="{ active: route.path === '/' }">
+          <Compass :size="15" />
           史库广场
         </RouterLink>
         <RouterLink to="/submit" class="nav-link" :class="{ active: route.path === '/submit' }">
@@ -41,6 +42,7 @@ const { isAuthenticated, user } = useAuth();
         <button
           type="button"
           class="btn btn-ghost icon-btn"
+          :aria-label="theme === 'dark' ? '切换浅色主题' : '切换深色主题'"
           :title="theme === 'dark' ? '切换浅色主题' : '切换深色主题'"
           @click="toggleTheme"
         >
@@ -50,6 +52,29 @@ const { isAuthenticated, user } = useAuth();
       </div>
     </div>
   </header>
+
+  <!-- Mobile Bottom Tab Bar (<= 640px) -->
+  <nav class="mobile-tabbar" aria-label="移动端主导航">
+    <RouterLink to="/" class="tabbar-item" :class="{ active: route.path === '/' }">
+      <Compass :size="20" />
+      <span>史库广场</span>
+    </RouterLink>
+    <RouterLink to="/submit" class="tabbar-item" :class="{ active: route.path === '/submit' }">
+      <PlusCircle :size="20" />
+      <span>真人投稿</span>
+    </RouterLink>
+    <RouterLink
+      to="/admin"
+      class="tabbar-item"
+      :class="{ active: route.path.startsWith('/admin') }"
+    >
+      <span class="tabbar-icon-wrap">
+        <ShieldCheck :size="20" />
+        <span v-if="isAuthenticated" class="tabbar-dot" />
+      </span>
+      <span>审核台</span>
+    </RouterLink>
+  </nav>
 </template>
 
 <style scoped>
@@ -57,8 +82,8 @@ const { isAuthenticated, user } = useAuth();
   position: sticky;
   top: 0;
   z-index: 40;
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
   background: var(--bg-glass);
   border-bottom: 1px solid var(--border);
 }
@@ -77,6 +102,7 @@ const { isAuthenticated, user } = useAuth();
   gap: 10px;
   font-size: 16px;
   letter-spacing: -0.02em;
+  min-width: 0;
 }
 
 .brand-logo {
@@ -86,6 +112,7 @@ const { isAuthenticated, user } = useAuth();
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  flex-shrink: 0;
   color: #ffffff;
   background: linear-gradient(135deg, #4f46e5 0%, #ec4899 100%);
   box-shadow: 0 4px 12px rgba(79, 70, 229, 0.28);
@@ -95,6 +122,7 @@ const { isAuthenticated, user } = useAuth();
   display: inline-flex;
   align-items: baseline;
   gap: 6px;
+  white-space: nowrap;
 }
 
 .brand-sub {
@@ -136,6 +164,7 @@ const { isAuthenticated, user } = useAuth();
   background: var(--bg-elevated);
   color: var(--text);
   box-shadow: var(--shadow-xs);
+  font-weight: 600;
 }
 
 .online-dot {
@@ -158,13 +187,81 @@ const { isAuthenticated, user } = useAuth();
   border-radius: var(--radius-sm);
 }
 
-@media (max-width: 640px) {
+.mobile-tabbar {
+  display: none;
+}
+
+@media (max-width: 720px) {
   .brand-sub {
     display: none;
   }
-  .nav-link {
-    padding: 6px 10px;
-    font-size: 13px;
+}
+
+@media (max-width: 640px) {
+  .header-inner {
+    height: 54px;
+  }
+
+  .brand-logo {
+    width: 30px;
+    height: 30px;
+    border-radius: 8px;
+  }
+
+  .main-nav {
+    display: none;
+  }
+
+  .mobile-tabbar {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 60;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    background: var(--bg-glass);
+    backdrop-filter: blur(18px);
+    -webkit-backdrop-filter: blur(18px);
+    border-top: 1px solid var(--border);
+    padding: 6px 8px calc(6px + env(safe-area-inset-bottom, 0px));
+    box-shadow: 0 -4px 20px rgba(15, 23, 42, 0.06);
+  }
+
+  .tabbar-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    padding: 4px 0;
+    border-radius: var(--radius-sm);
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text-muted);
+    transition: color 0.15s ease, background 0.15s ease;
+  }
+
+  .tabbar-item.active {
+    color: var(--accent);
+    background: var(--accent-soft);
+    font-weight: 600;
+  }
+
+  .tabbar-icon-wrap {
+    position: relative;
+    display: inline-flex;
+  }
+
+  .tabbar-dot {
+    position: absolute;
+    top: -1px;
+    right: -4px;
+    width: 7px;
+    height: 7px;
+    border-radius: 999px;
+    background: var(--success);
+    border: 1.5px solid var(--bg-elevated);
   }
 }
 </style>

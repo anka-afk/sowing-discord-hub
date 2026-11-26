@@ -10,7 +10,8 @@ const emit = defineEmits<{
 }>();
 
 const toast = useToast();
-const username = ref('admin');
+const isDev = import.meta.env.DEV;
+const username = ref(isDev ? 'admin' : '');
 const password = ref('');
 const loading = ref(false);
 const errorMsg = ref('');
@@ -82,7 +83,7 @@ async function handleSubmit() {
         {{ loading ? '验证中…' : '登录审核台' }}
       </button>
 
-      <p class="muted dev-hint">
+      <p v-if="isDev" class="muted dev-hint">
         本地默认开发账号：<span class="mono">admin</span> / <span class="mono">admin123456</span>
       </p>
     </form>

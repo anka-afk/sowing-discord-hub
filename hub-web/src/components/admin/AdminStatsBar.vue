@@ -69,7 +69,7 @@ const storagePct = computed(() => {
 
     <div class="card stat-tile stat-storage">
       <div class="tile-head">
-        <span class="muted">R2 存储占比</span>
+        <span class="muted">媒体存储占比</span>
         <HardDrive :size="16" class="icon-accent" />
       </div>
       <div class="storage-row">
@@ -166,6 +166,13 @@ const storagePct = computed(() => {
 @media (max-width: 960px) {
   .stats-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+  .stat-tile {
+    padding: 10px 12px;
+  }
+  .tile-val {
+    font-size: 20px;
   }
   .stat-storage {
     grid-column: 1 / -1;

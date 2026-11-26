@@ -1,6 +1,8 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
 import {
+  ArrowUp,
   Dices,
   Filter,
   Inbox,
@@ -12,10 +14,11 @@ import {
 import { api } from '@/api/client';
 import type { HubMetaResponse, MemeItem, NsfwLevel } from '@/types/api';
 import { useToast } from '@/composables/useToast';
+import { FALLBACK_QUICK_TAGS } from '@/utils/tags';
 import MemeCard from '@/components/MemeCard.vue';
 
-const DEFAULT_TAGS = ['沙雕', '群聊日常', '地狱笑话', '二次元', '抽象', '科技', '游戏', '猫猫'];
-
+const route = useRoute();
+const router = useRouter();
 const toast = useToast();
 const meta = ref<HubMetaResponse | null>(null);
 const items = ref<MemeItem[]>([]);
@@ -24,13 +27,14 @@ const loadingMore = ref(false);
 const errorMsg = ref<string | null>(null);
 const hasMore = ref(false);
 const mode = ref<'feed' | 'random'>('feed');
+const showBackTop = ref(false);
 
 const selectedTags = ref<string[]>([]);
 const maxNsfw = ref<NsfwLevel>(1);
 
 const availableTags = computed(() => {
   const fromMeta = meta.value?.tags ?? [];
-  return fromMeta.length > 0 ? fromMeta : DEFAULT_TAGS;
+  return fromMeta.length > 0 ? fromMeta : [...FALLBACK_QUICK_TAGS];
 });
 
 const oldestSeq = computed(() => {
@@ -47,9 +51,29 @@ function toggleTag(tag: string) {
   }
 }
 
+function handleCardTagClick(tag: string) {
+  if (!selectedTags.value.includes(tag)) {
+    selectedTags.value = [tag];
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  } else {
+    toggleTag(tag);
+  }
+}
+
 function clearFilters() {
   selectedTags.value = [];
   maxNsfw.value = 1;
+  if (route.query.tag) {
+    router.replace({ query: {} });
+  }
+}
+
+function scrollToTop() {
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+function handleScroll() {
+  showBackTop.value = window.scrollY > 480;
 }
 
 async function fetchMeta() {
@@ -112,13 +136,37 @@ async function loadRandom() {
   }
 }
 
-watch([selectedTags, maxNsfw], () => {
-  loadFeed(false);
-}, { deep: true });
+watch(
+  [selectedTags, maxNsfw],
+  () => {
+    loadFeed(false);
+  },
+  { deep: true },
+);
+
+watch(
+  () => route.query.tag,
+  (qTag) => {
+    const tagStr = typeof qTag === 'string' ? qTag.trim() : '';
+    if (tagStr && !selectedTags.value.includes(tagStr)) {
+      selectedTags.value = [tagStr];
+    }
+  },
+);
 
 onMounted(() => {
+  window.addEventListener('scroll', handleScroll, { passive: true });
   fetchMeta();
-  loadFeed(false);
+  const initialTag = typeof route.query.tag === 'string' ? route.query.tag.trim() : '';
+  if (initialTag) {
+    selectedTags.value = [initialTag];
+  } else {
+    loadFeed(false);
+  }
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener('scroll', handleScroll);
 });
 </script>
 
@@ -133,7 +181,7 @@ onMounted(() => {
         </div>
         <h1>精选搬史广场</h1>
         <p class="muted">
-          跨平台公益内容中枢 — 人工审核去重、原生脱敏聊天记录、无状态高可用分发。支持 AstrBot 插件零加群直连。
+          跨平台公益内容中枢 — 人工审核去重、高清脱敏聊天记录、无状态高可用分发。支持 AstrBot 插件零加群直连。
         </p>
       </div>
       <div class="hero-actions">
@@ -152,7 +200,7 @@ onMounted(() => {
     <section class="filter-bar card">
       <div class="filter-group">
         <span class="filter-label">
-          <Filter :size="14" /> 标签筛选
+          <Filter :size="14" /> 标签
         </span>
         <div class="chip-list">
           <button
@@ -168,7 +216,7 @@ onMounted(() => {
           <button
             v-if="selectedTags.length > 0"
             type="button"
-            class="btn btn-sm btn-ghost"
+            class="btn btn-sm btn-ghost reset-btn"
             @click="clearFilters"
           >
             重置
@@ -179,7 +227,7 @@ onMounted(() => {
       <div class="filter-right">
         <label class="nsfw-control">
           <ShieldAlert :size="14" class="muted" />
-          <span class="filter-label">分级上限</span>
+          <span class="filter-label hide-xs">分级上限</span>
           <select v-model.number="maxNsfw" class="select nsfw-select">
             <option :value="0">仅全年龄 (L0)</option>
             <option :value="1">含轻度敏感 (≤L1)</option>
@@ -189,7 +237,7 @@ onMounted(() => {
 
         <button
           type="button"
-          class="btn btn-sm"
+          class="btn btn-sm refresh-btn"
           :disabled="loading"
           @click="loadFeed(false)"
         >
@@ -242,12 +290,18 @@ onMounted(() => {
         </button>
       </div>
 
-      <MemeCard v-for="item in items" :key="item.id" :item="item" compact />
+      <MemeCard
+        v-for="item in items"
+        :key="item.id"
+        :item="item"
+        compact
+        @select-tag="handleCardTagClick"
+      />
 
       <div v-if="hasMore && mode === 'feed'" class="load-more-wrap">
         <button
           type="button"
-          class="btn btn-lg"
+          class="btn btn-lg load-more-btn"
           :disabled="loadingMore"
           @click="loadFeed(true)"
         >
@@ -255,6 +309,20 @@ onMounted(() => {
         </button>
       </div>
     </div>
+
+    <!-- Floating Back-to-Top Button -->
+    <Transition name="fade">
+      <button
+        v-if="showBackTop"
+        type="button"
+        class="back-top-btn"
+        aria-label="回到顶部"
+        title="回到顶部"
+        @click="scrollToTop"
+      >
+        <ArrowUp :size="18" />
+      </button>
+    </Transition>
   </div>
 </template>
 
@@ -264,7 +332,7 @@ onMounted(() => {
   padding-bottom: 56px;
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: 18px;
 }
 
 .hero {
@@ -273,7 +341,9 @@ onMounted(() => {
   align-items: center;
   justify-content: space-between;
   gap: 24px;
+  border-color: var(--accent-border);
   background: linear-gradient(135deg, var(--bg-elevated) 0%, var(--accent-soft) 100%);
+  box-shadow: var(--shadow-sm);
 }
 
 .hero-copy {
@@ -292,6 +362,13 @@ onMounted(() => {
   font-size: 12px;
   font-weight: 600;
   margin-bottom: 10px;
+  max-width: 100%;
+}
+
+.hero-pill span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .hero h1 {
@@ -318,7 +395,7 @@ onMounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  gap: 14px;
   flex-wrap: wrap;
 }
 
@@ -328,6 +405,7 @@ onMounted(() => {
   gap: 10px;
   flex-wrap: wrap;
   flex: 1;
+  min-width: 0;
 }
 
 .filter-label {
@@ -338,6 +416,7 @@ onMounted(() => {
   font-weight: 600;
   color: var(--text-secondary);
   white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .chip-list {
@@ -345,6 +424,10 @@ onMounted(() => {
   align-items: center;
   gap: 6px;
   flex-wrap: wrap;
+}
+
+.reset-btn {
+  flex-shrink: 0;
 }
 
 .filter-right {
@@ -362,7 +445,7 @@ onMounted(() => {
 
 .nsfw-select {
   width: auto;
-  height: 32px;
+  height: 34px;
   padding: 0 10px;
   font-size: 13px;
 }
@@ -413,12 +496,51 @@ onMounted(() => {
   margin-top: 8px;
   display: flex;
   gap: 10px;
+  flex-wrap: wrap;
+  justify-content: center;
 }
 
 .load-more-wrap {
   display: flex;
   justify-content: center;
   padding-top: 8px;
+}
+
+.back-top-btn {
+  position: fixed;
+  right: 22px;
+  bottom: 24px;
+  z-index: 45;
+  width: 42px;
+  height: 42px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-glass);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  color: var(--text);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: var(--shadow-md);
+  transition: transform 0.16s ease, border-color 0.16s ease;
+}
+
+.back-top-btn:hover {
+  transform: translateY(-2px);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+  transform: translateY(8px);
 }
 
 .spin {
@@ -432,19 +554,91 @@ onMounted(() => {
 }
 
 @media (max-width: 760px) {
+  .page-wrap {
+    padding-top: 16px;
+    gap: 14px;
+  }
+
   .hero {
     flex-direction: column;
     align-items: flex-start;
-    padding: 20px;
+    padding: 18px 16px;
+    gap: 16px;
   }
+
   .hero h1 {
-    font-size: 23px;
+    font-size: 22px;
   }
+
+  .hero p {
+    font-size: 13.5px;
+  }
+
   .hero-actions {
     width: 100%;
   }
+
   .hero-actions > * {
     flex: 1;
+    height: 42px;
+    padding: 0 12px;
+  }
+
+  .filter-bar {
+    padding: 12px 14px;
+    gap: 10px;
+  }
+
+  .filter-group {
+    width: 100%;
+    flex-wrap: nowrap;
+    gap: 8px;
+  }
+
+  .chip-list {
+    flex: 1;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    padding-bottom: 2px;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .chip-list::-webkit-scrollbar {
+    display: none;
+  }
+
+  .chip-list .chip {
+    flex-shrink: 0;
+  }
+
+  .filter-right {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .nsfw-control {
+    flex: 1;
+  }
+
+  .nsfw-select {
+    flex: 1;
+    font-size: 14px;
+  }
+
+  .load-more-btn {
+    width: 100%;
+  }
+}
+
+@media (max-width: 640px) {
+  .hide-xs {
+    display: none;
+  }
+
+  .back-top-btn {
+    right: 14px;
+    bottom: calc(74px + env(safe-area-inset-bottom, 0px));
   }
 }
 </style>

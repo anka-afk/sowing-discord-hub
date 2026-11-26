@@ -43,4 +43,11 @@ import ToastHost from '@/components/ToastHost.vue';
   gap: 12px;
   flex-wrap: wrap;
 }
+
+@media (max-width: 640px) {
+  .site-footer {
+    padding: 16px 0 calc(78px + env(safe-area-inset-bottom, 0px));
+    font-size: 12px;
+  }
+}
 </style>

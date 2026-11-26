@@ -16,6 +16,10 @@ const props = withDefaults(
   },
 );
 
+const emit = defineEmits<{
+  (e: 'select-tag', tag: string): void;
+}>();
+
 const toast = useToast();
 const nsfw = computed(() => nsfwMeta(props.item.nsfw_level ?? 0));
 
@@ -60,9 +64,16 @@ async function copyShareLink() {
     </div>
 
     <div v-if="item.tags?.length" class="meme-tags">
-      <span v-for="tag in item.tags" :key="tag" class="tag-pill">
+      <button
+        v-for="tag in item.tags"
+        :key="tag"
+        type="button"
+        class="tag-pill"
+        title="点击按该标签筛选"
+        @click="emit('select-tag', tag)"
+      >
         <Hash :size="11" />{{ tag }}
-      </span>
+      </button>
     </div>
 
     <footer class="meme-foot">
@@ -165,12 +176,21 @@ async function copyShareLink() {
   display: inline-flex;
   align-items: center;
   gap: 3px;
-  padding: 3px 9px;
+  padding: 4px 10px;
   border-radius: var(--radius-full);
+  border: 1px solid transparent;
   background: var(--bg-subtle);
   color: var(--text-secondary);
   font-size: 12px;
   font-weight: 500;
+  cursor: pointer;
+  transition: all 0.14s ease;
+}
+
+.tag-pill:hover {
+  background: var(--accent-soft);
+  border-color: var(--accent-border);
+  color: var(--accent);
 }
 
 .meme-foot {
@@ -208,5 +228,20 @@ async function copyShareLink() {
   display: inline-flex;
   align-items: center;
   gap: 4px;
+}
+
+@media (max-width: 640px) {
+  .meme-card {
+    padding: 14px;
+    gap: 11px;
+  }
+
+  .meme-title {
+    font-size: 16.5px;
+  }
+
+  .stats-row {
+    gap: 9px;
+  }
 }
 </style>

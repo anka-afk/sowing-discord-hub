@@ -26,6 +26,7 @@ import type {
 } from '@/types/api';
 import { AVATAR_PALETTE } from '@/utils/chatRenderer';
 import { detectVideoPlatform, formatBytes, scanLocalPrivacyRisks } from '@/utils/format';
+import { FALLBACK_QUICK_TAGS, parseCustomTagInput } from '@/utils/tags';
 import { useToast } from '@/composables/useToast';
 import ChatPreviewCard from '@/components/ChatPreviewCard.vue';
 import TurnstileWidget from '@/components/TurnstileWidget.vue';
@@ -61,7 +62,7 @@ interface EditableChatRow {
 }
 
 const MAX_CHAT_NODES = 50;
-const PRESET_TAGS = ['沙雕', '群聊日常', '地狱笑话', '二次元', '抽象', '科技', '游戏', '猫猫'];
+const PRESET_TAGS = [...FALLBACK_QUICK_TAGS];
 
 const toast = useToast();
 const meta = ref<HubMetaResponse | null>(null);
@@ -174,14 +175,16 @@ function toggleTag(tag: string) {
 }
 
 function addCustomTag() {
-  const t = customTagInput.value.trim().replace(/^#/, '');
-  if (!t) return;
-  if (!selectedTags.value.includes(t)) {
-    if (selectedTags.value.length >= 6) {
-      toast.warning('最多选择 6 个标签');
-      return;
+  const parsed = parseCustomTagInput(customTagInput.value);
+  if (parsed.length === 0) return;
+  for (const t of parsed) {
+    if (!selectedTags.value.includes(t)) {
+      if (selectedTags.value.length >= 6) {
+        toast.warning('最多选择 6 个标签');
+        break;
+      }
+      selectedTags.value.push(t);
     }
-    selectedTags.value.push(t);
   }
   customTagInput.value = '';
 }
@@ -854,7 +857,7 @@ onBeforeUnmount(() => {
             <div class="chat-preview-col">
               <div class="col-header">
                 <strong>实时所见即所得预览</strong>
-                <span class="muted" style="font-size: 12px">审核过审后将自动渲染为 720px 高清切片</span>
+                <span class="muted" style="font-size: 12px">过审后将自动渲染为 1080px 高清切片</span>
               </div>
               <ChatPreviewCard :messages="previewChatMessages" :title="title || '群聊记录'" />
             </div>
@@ -1437,6 +1440,53 @@ onBeforeUnmount(() => {
   }
   .chat-preview-col {
     position: static;
+  }
+}
+
+@media (max-width: 640px) {
+  .submit-page {
+    padding-top: 16px;
+    gap: 14px;
+  }
+
+  .page-head h1 {
+    font-size: 22px;
+  }
+
+  .mode-tabs {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    padding-bottom: 2px;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .mode-tabs::-webkit-scrollbar {
+    display: none;
+  }
+
+  .mode-tab {
+    flex-shrink: 0;
+    padding: 9px 13px;
+    font-size: 13.5px;
+  }
+
+  .editor-card {
+    padding: 16px;
+    gap: 15px;
+  }
+
+  .dropzone {
+    padding: 24px 14px;
+  }
+
+  .submit-footer {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .submit-footer .btn-primary {
+    width: 100%;
   }
 }
 </style>

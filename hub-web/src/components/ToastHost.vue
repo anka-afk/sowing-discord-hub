@@ -115,4 +115,20 @@ const { toasts, remove } = useToast();
   opacity: 0;
   transform: translateX(20px);
 }
+
+@media (max-width: 640px) {
+  .toast-stack {
+    top: 62px;
+    bottom: auto;
+    right: 50%;
+    transform: translateX(50%);
+    flex-direction: column;
+    width: calc(100vw - 24px);
+  }
+  .toast-enter-from,
+  .toast-leave-to {
+    opacity: 0;
+    transform: translateY(-12px);
+  }
+}
 </style>

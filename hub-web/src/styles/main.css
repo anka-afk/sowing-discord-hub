@@ -84,12 +84,25 @@ body {
   margin: 0;
   padding: 0;
   background-color: var(--bg);
+  background-image: radial-gradient(
+      ellipse 80% 45% at 50% -10%,
+      var(--accent-soft),
+      transparent 70%
+    );
+  background-repeat: no-repeat;
   color: var(--text);
   font-family: var(--font-sans);
   font-size: 15px;
   line-height: 1.6;
+  overflow-x: clip;
   -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
   transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 a {
@@ -412,4 +425,26 @@ kbd {
 ::-webkit-scrollbar-thumb {
   background: var(--border-strong);
   border-radius: 999px;
+}
+
+@media (max-width: 640px) {
+  .container,
+  .container-narrow {
+    padding: 0 14px;
+  }
+
+  /* Avoid iOS Safari auto-zooming on focused inputs */
+  .input,
+  .textarea,
+  .select {
+    font-size: 16px;
+  }
+
+  .btn {
+    min-height: 38px;
+  }
+
+  .btn-sm {
+    min-height: 34px;
+  }
 }

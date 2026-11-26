@@ -1,20 +1,24 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import {
   AlertOctagon,
   AlertTriangle,
   Check,
   CheckCircle2,
+  CopyCheck,
   Edit3,
   ExternalLink,
   Hash,
   Keyboard,
   Layers,
   LogOut,
+  Plus,
   RefreshCw,
   ShieldAlert,
   SkipForward,
   Sparkles,
+  Tag,
+  Trash2,
   UserCheck,
   X,
 } from 'lucide-vue-next';
@@ -36,6 +40,14 @@ import {
   type RenderedChatSlice,
 } from '@/utils/chatRenderer';
 import { formatRelativeTime, nsfwMeta, scanLocalPrivacyRisks } from '@/utils/format';
+import {
+  buildTagCatalog,
+  loadLastApprovedTags,
+  loadRecentTags,
+  parseCustomTagInput,
+  saveLastApprovedTags,
+  saveRecentTags,
+} from '@/utils/tags';
 import BlockRenderer from '@/components/BlockRenderer.vue';
 import ChatPreviewCard from '@/components/ChatPreviewCard.vue';
 import AdminLoginCard from '@/components/admin/AdminLoginCard.vue';
@@ -44,7 +56,6 @@ import AdminKillSwitchPanel from '@/components/admin/AdminKillSwitchPanel.vue';
 
 type AdminMode = 'pending' | 'pending_recheck' | 'killswitch';
 
-const QUICK_TAGS = ['沙雕', '群聊日常', '地狱笑话', '二次元', '抽象', '科技', '游戏', '猫猫'];
 const REJECT_REASONS = [
   { key: '1', code: 'duplicate', label: '重复 / 火星了' },
   { key: '2', code: 'policy_violation', label: '违规 / 涉敏隐私' },
@@ -62,6 +73,13 @@ const loadingQueue = ref(false);
 const actionBusy = ref(false);
 const busyStage = ref('');
 
+// Tagging state (dynamic server catalog + local MRU + last-approved reuse)
+const serverTags = ref<string[]>([]);
+const recentTags = ref<string[]>(loadRecentTags());
+const lastApprovedTags = ref<string[]>(loadLastApprovedTags());
+const showAllTags = ref(false);
+const tagInputRef = ref<HTMLInputElement | null>(null);
+
 // Editable review metadata for current card
 const editTitle = ref('');
 const editSummary = ref('');
@@ -71,10 +89,9 @@ const customTag = ref('');
 const editedChatMessages = ref<ChatMessageNode[] | null>(null);
 const showChatEditor = ref(false);
 
-// Interactive overlays for keyboard flow
+// Interactive overlays for keyboard & mobile flow
 const showRejectModal = ref(false);
 const customRejectReason = ref('');
-const showTagPicker = ref(false);
 
 // Canvas rendered slices preview for chat_record
 const renderedSlices = ref<RenderedChatSlice[]>([]);
@@ -104,6 +121,25 @@ const nonChatBlocks = computed(() => {
   return currentItem.value.blocks.filter((b) => b.type !== 'chat_record');
 });
 
+const fullTagCatalog = computed(() =>
+  buildTagCatalog(serverTags.value, recentTags.value, editTags.value),
+);
+
+const shortcutTags = computed(() => fullTagCatalog.value.slice(0, 9));
+
+const visibleCatalogTags = computed(() => {
+  const q = customTag.value.trim().replace(/^#+/, '').toLowerCase();
+  if (q) {
+    return fullTagCatalog.value.filter((t) => t.toLowerCase().includes(q));
+  }
+  return showAllTags.value ? fullTagCatalog.value : fullTagCatalog.value.slice(0, 12);
+});
+
+const hiddenTagCount = computed(() => {
+  if (customTag.value.trim()) return 0;
+  return Math.max(0, fullTagCatalog.value.length - 12);
+});
+
 const mergedPrivacyWarnings = computed(() => {
   const list: Array<{ label: string; detail: string; source: 'server' | 'local' }> = [];
   const item = currentItem.value;
@@ -121,17 +157,24 @@ const mergedPrivacyWarnings = computed(() => {
     }
   }
 
-  // Also scan current editable text in real time
+  // Also scan current editable text in real time (recursively across nested chat)
   const texts = [editTitle.value, editSummary.value];
   for (const b of item.blocks) {
     if (b.type === 'text') texts.push(b.text);
   }
-  for (const m of activeChatMessages.value) {
-    texts.push(m.sender_alias);
-    for (const p of m.content) {
-      if (p.type === 'text') texts.push(p.text);
+  const collectChatTexts = (nodes: ChatMessageNode[]) => {
+    for (const m of nodes) {
+      texts.push(m.sender_alias);
+      for (const p of m.content) {
+        if (p.type === 'text') texts.push(p.text);
+        else if (p.type === 'forward_quote' && p.messages) {
+          collectChatTexts(p.messages);
+        }
+      }
     }
-  }
+  };
+  collectChatTexts(activeChatMessages.value);
+
   for (const localHit of scanLocalPrivacyRisks(texts.join('\n'))) {
     const dup = list.some((x) => x.detail.includes(localHit.excerpt));
     if (!dup) {
@@ -159,8 +202,8 @@ function syncEditorsFromCurrent() {
   revokeRenderedSlices(renderedSlices.value);
   renderedSlices.value = [];
   showRejectModal.value = false;
-  showTagPicker.value = false;
   showChatEditor.value = false;
+  customTag.value = '';
 
   const item = currentItem.value;
   if (!item) {
@@ -182,6 +225,27 @@ function syncEditorsFromCurrent() {
     : null;
 }
 
+function preloadImageUrl(url?: string, mediaId?: string) {
+  const resolved = api.resolveMediaUrl(url, mediaId, true);
+  if (resolved && !preloadedUrls.has(resolved)) {
+    preloadedUrls.add(resolved);
+    const img = new Image();
+    img.src = resolved;
+  }
+}
+
+function preloadChatMedia(messages: ChatMessageNode[]) {
+  for (const msg of messages) {
+    for (const part of msg.content ?? []) {
+      if (part.type === 'image' || part.type === 'gif') {
+        preloadImageUrl(part.url, part.media_id);
+      } else if (part.type === 'forward_quote' && part.messages) {
+        preloadChatMedia(part.messages);
+      }
+    }
+  }
+}
+
 /**
  * Preload media assets for the next 2 items in queue to keep keyboard review snappy (2-3s/item).
  */
@@ -190,27 +254,22 @@ function preloadUpcomingMedia() {
   for (const item of upcoming) {
     for (const block of item.blocks) {
       if (block.type === 'image' || block.type === 'gif') {
-        const url = api.resolveMediaUrl(block.url, block.media_id, true);
-        if (url && !preloadedUrls.has(url)) {
-          preloadedUrls.add(url);
-          const img = new Image();
-          img.src = url;
-        }
+        preloadImageUrl(block.url, block.media_id);
       } else if (block.type === 'chat_record') {
-        for (const msg of block.messages ?? []) {
-          for (const part of msg.content ?? []) {
-            if (part.type === 'image') {
-              const url = api.resolveMediaUrl(part.url, part.media_id, true);
-              if (url && !preloadedUrls.has(url)) {
-                preloadedUrls.add(url);
-                const img = new Image();
-                img.src = url;
-              }
-            }
-          }
-        }
+        preloadChatMedia(block.messages ?? []);
       }
     }
+  }
+}
+
+async function fetchMetaTags() {
+  try {
+    const meta = await api.getMeta();
+    if (Array.isArray(meta.tags) && meta.tags.length > 0) {
+      serverTags.value = meta.tags;
+    }
+  } catch {
+    // Fallback to built-in quick tag presets
   }
 }
 
@@ -255,6 +314,7 @@ function handleUnauthorized() {
 
 function onLoggedIn(session: AdminLoginResponse) {
   setSession(session);
+  fetchMetaTags();
   fetchStats();
   fetchQueue();
 }
@@ -326,12 +386,56 @@ function toggleTag(tag: string) {
   }
 }
 
-function addCustomTag() {
-  const t = customTag.value.trim().replace(/^#/, '');
-  if (t && !editTags.value.includes(t)) {
-    editTags.value.push(t);
+function addCustomTag(blurOnEmpty = false) {
+  const raw = customTag.value.trim();
+  if (!raw) {
+    if (blurOnEmpty) {
+      tagInputRef.value?.blur();
+    }
+    return;
+  }
+  const parsed = parseCustomTagInput(raw);
+  const newlyAdded: string[] = [];
+  for (const t of parsed) {
+    if (!editTags.value.includes(t)) {
+      editTags.value.push(t);
+      newlyAdded.push(t);
+    }
+  }
+  if (parsed.length > 0) {
+    recentTags.value = saveRecentTags(parsed, recentTags.value);
   }
   customTag.value = '';
+  if (newlyAdded.length > 0) {
+    toast.info(`已添加标签：${newlyAdded.map((t) => `#${t}`).join(' ')}`);
+  }
+}
+
+function applyLastApprovedTags() {
+  if (lastApprovedTags.value.length === 0) return;
+  let added = 0;
+  for (const tag of lastApprovedTags.value) {
+    if (!editTags.value.includes(tag)) {
+      editTags.value.push(tag);
+      added++;
+    }
+  }
+  if (added > 0) {
+    toast.info(`已复用上条标签：${lastApprovedTags.value.map((t) => `#${t}`).join(' ')}`);
+  } else {
+    toast.info('当前条目已包含上条全部标签');
+  }
+}
+
+function clearEditTags() {
+  editTags.value = [];
+}
+
+function focusTagInput() {
+  nextTick(() => {
+    tagInputRef.value?.focus();
+    tagInputRef.value?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  });
 }
 
 function skipCurrent() {
@@ -358,13 +462,18 @@ async function approveCurrent() {
   const item = currentItem.value;
   if (!item || actionBusy.value) return;
 
+  // Auto-commit any pending text typed into the custom tag input before approving
+  if (customTag.value.trim()) {
+    addCustomTag();
+  }
+
   actionBusy.value = true;
   busyStage.value = '准备审核通过…';
   try {
     let uploadedSlicesMeta: { media_id: string }[] | undefined;
 
     if (chatBlock.value) {
-      busyStage.value = '正在浏览器端 Canvas 渲染 720px WebP 切片…';
+      busyStage.value = '正在浏览器端 Canvas 渲染 1080px 高清 WebP 切片…';
       const slices =
         renderedSlices.value.length > 0
           ? renderedSlices.value
@@ -386,22 +495,30 @@ async function approveCurrent() {
       }
     }
 
+    const finalTags = [...editTags.value];
     busyStage.value = '正在提交审核通过…';
     const resp = await api.reviewItem(item.id, {
       action: 'approve',
       title: editTitle.value.trim() || undefined,
       summary: editSummary.value.trim() || undefined,
-      tags: editTags.value,
+      tags: finalTags,
       nsfw_level: editNsfw.value,
       rendered_images: uploadedSlicesMeta,
       edited_chat_messages: chatBlock.value ? activeChatMessages.value : undefined,
     });
 
+    if (finalTags.length > 0) {
+      lastApprovedTags.value = saveLastApprovedTags(finalTags);
+      recentTags.value = saveRecentTags(finalTags, recentTags.value);
+    }
+
     toast.success(
       `已通过发布${resp.seq != null ? ` (#${resp.seq})` : ''}`,
       uploadedSlicesMeta
-        ? `已随单上传 ${uploadedSlicesMeta.length} 张 720px 聊天切片`
-        : undefined,
+        ? `已随单上传 ${uploadedSlicesMeta.length} 张 1080px 聊天切片`
+        : finalTags.length > 0
+          ? `标签：${finalTags.map((t) => `#${t}`).join(' ')}`
+          : undefined,
     );
     removeCurrentAndAdvance();
   } catch (err) {
@@ -464,20 +581,16 @@ function handleKeydown(e: KeyboardEvent) {
       e.preventDefault();
       return;
     }
-    if (showTagPicker.value) {
-      showTagPicker.value = false;
-      e.preventDefault();
-      return;
-    }
     if (document.activeElement instanceof HTMLElement) {
       document.activeElement.blur();
+      e.preventDefault();
     }
     return;
   }
 
   if (isTypingTarget(e.target)) return;
 
-  // Reject sub-keys 1 / 2 / 3 when reject popover is open
+  // Reject sub-keys 1 / 2 / 3 when reject drawer/sheet is open
   if (showRejectModal.value) {
     const matched = REJECT_REASONS.find((r) => r.key === e.key);
     if (matched) {
@@ -487,12 +600,13 @@ function handleKeydown(e: KeyboardEvent) {
     return;
   }
 
-  // Quick tag selection 1..8 when tag picker is open
-  if (showTagPicker.value && /^[1-8]$/.test(e.key)) {
+  // Direct 1..9 instant tag toggling (no need to press T first!)
+  if (/^[1-9]$/.test(e.key)) {
     const idx = Number(e.key) - 1;
-    if (QUICK_TAGS[idx]) {
+    const tag = shortcutTags.value[idx];
+    if (tag) {
       e.preventDefault();
-      toggleTag(QUICK_TAGS[idx]);
+      toggleTag(tag);
     }
     return;
   }
@@ -504,14 +618,15 @@ function handleKeydown(e: KeyboardEvent) {
   } else if (key === 'r') {
     e.preventDefault();
     showRejectModal.value = true;
-    showTagPicker.value = false;
   } else if (key === 'n') {
     e.preventDefault();
     cycleNsfw();
   } else if (key === 't') {
     e.preventDefault();
-    showTagPicker.value = !showTagPicker.value;
-    showRejectModal.value = false;
+    focusTagInput();
+  } else if (key === 'l') {
+    e.preventDefault();
+    applyLastApprovedTags();
   } else if (e.code === 'Space') {
     e.preventDefault();
     skipCurrent();
@@ -527,6 +642,7 @@ watch(activeMode, (next) => {
 onMounted(() => {
   window.addEventListener('keydown', handleKeydown);
   if (isAuthenticated.value) {
+    fetchMetaTags();
     fetchStats();
     fetchQueue();
   }
@@ -541,14 +657,14 @@ onBeforeUnmount(() => {
 <template>
   <AdminLoginCard v-if="!isAuthenticated" @logged-in="onLoggedIn" />
 
-  <div v-else class="container admin-page">
+  <div v-else class="container admin-page" :class="{ 'has-mobile-dock': Boolean(currentItem) && activeMode !== 'killswitch' }">
     <!-- Top Admin Bar -->
     <header class="admin-topbar">
-      <div>
+      <div class="topbar-title-group">
         <h1>极速审核台</h1>
-        <p class="muted" style="margin: 2px 0 0; font-size: 13px">
+        <p class="muted operator-meta">
           操作员 <strong>{{ user?.username }}</strong>
-          <span class="badge badge-accent" style="margin-left: 6px">{{ user?.role }}</span>
+          <span class="badge badge-accent">{{ user?.role }}</span>
         </p>
       </div>
 
@@ -560,7 +676,7 @@ onBeforeUnmount(() => {
             :class="{ 'btn-primary': activeMode === 'pending' }"
             @click="activeMode = 'pending'"
           >
-            待审队列 ({{ stats?.pending_count ?? queue.length }})
+            待审 ({{ stats?.pending_count ?? queue.length }})
           </button>
           <button
             type="button"
@@ -568,7 +684,7 @@ onBeforeUnmount(() => {
             :class="{ 'btn-primary': activeMode === 'pending_recheck' }"
             @click="activeMode = 'pending_recheck'"
           >
-            熔断复核 ({{ stats?.pending_recheck_count ?? 0 }})
+            复核 ({{ stats?.pending_recheck_count ?? 0 }})
           </button>
           <button
             type="button"
@@ -580,12 +696,14 @@ onBeforeUnmount(() => {
           </button>
         </div>
 
-        <button type="button" class="btn btn-sm" @click="fetchStats(); fetchQueue()">
-          <RefreshCw :size="14" /> 刷新
-        </button>
-        <button type="button" class="btn btn-sm btn-ghost" @click="logout">
-          <LogOut :size="14" /> 退出
-        </button>
+        <div class="util-actions">
+          <button type="button" class="btn btn-sm" @click="fetchStats(); fetchQueue()">
+            <RefreshCw :size="14" /> <span class="hide-xs">刷新</span>
+          </button>
+          <button type="button" class="btn btn-sm btn-ghost" @click="logout">
+            <LogOut :size="14" /> <span class="hide-xs">退出</span>
+          </button>
+        </div>
       </div>
     </header>
 
@@ -598,21 +716,31 @@ onBeforeUnmount(() => {
       @takedown-done="fetchStats()"
     />
 
-    <!-- Mode: Single-Card Focus Keyboard Review Desk -->
+    <!-- Mode: Single-Card Focus Keyboard & Touch Review Desk -->
     <template v-else>
-      <!-- Keyboard Legend Bar -->
+      <!-- Desktop Keyboard Legend Bar -->
       <div class="shortcut-bar card">
         <span class="shortcut-label">
-          <Keyboard :size="15" /> 键盘流快捷键：
+          <Keyboard :size="15" /> 键盘流：
         </span>
-        <span class="shortcut-item"><kbd>A</kbd> 通过并发布</span>
-        <span class="shortcut-item"><kbd>R</kbd> 拒绝（<kbd>1</kbd>重复 <kbd>2</kbd>违规 <kbd>3</kbd>低质）</span>
+        <span class="shortcut-item"><kbd>1</kbd>–<kbd>9</kbd> 秒打标签</span>
+        <span class="shortcut-item"><kbd>L</kbd> 复用上条</span>
+        <span class="shortcut-item"><kbd>T</kbd> 自定义标签</span>
         <span class="shortcut-item"><kbd>N</kbd> 切换分级</span>
-        <span class="shortcut-item"><kbd>T</kbd> 快选标签</span>
+        <span class="shortcut-item"><kbd>A</kbd> 通过</span>
+        <span class="shortcut-item"><kbd>R</kbd> 拒绝</span>
         <span class="shortcut-item"><kbd>Space</kbd> 跳过</span>
         <span class="shortcut-progress muted">
           进度 {{ queue.length ? currentIndex + 1 : 0 }} / {{ queue.length }}
         </span>
+      </div>
+
+      <!-- Compact Mobile Progress Bar -->
+      <div class="mobile-progress-strip">
+        <span class="badge badge-accent mono">
+          进度 {{ queue.length ? currentIndex + 1 : 0 }} / {{ queue.length }}
+        </span>
+        <span v-if="currentItem" class="muted mono mobile-item-id">{{ currentItem.id }}</span>
       </div>
 
       <!-- Loading / Empty Queue -->
@@ -640,16 +768,16 @@ onBeforeUnmount(() => {
             <div class="card rep-strip">
               <div class="rep-item">
                 <UserCheck :size="15" class="accent-icon" />
-                <span>投稿者过审率：<strong>{{ submitterApprovalRateText || '未知' }}</strong></span>
+                <span>过审率：<strong>{{ submitterApprovalRateText || '未知' }}</strong></span>
                 <span v-if="currentItem.submitter_stats" class="muted">
-                  (过审 {{ currentItem.submitter_stats.approved_cnt ?? 0 }} / 拒审 {{ currentItem.submitter_stats.rejected_cnt ?? 0 }}
-                  · 信誉 Lv.{{ currentItem.submitter_stats.trust_level ?? 0 }})
+                  (过 {{ currentItem.submitter_stats.approved_cnt ?? 0 }} / 拒 {{ currentItem.submitter_stats.rejected_cnt ?? 0 }}
+                  · Lv.{{ currentItem.submitter_stats.trust_level ?? 0 }})
                 </span>
               </div>
-              <div class="rep-item muted">
-                <span>来源：{{ currentItem.source_type || currentItem.attribution?.origin_label || 'web' }}</span>
+              <div class="rep-item muted rep-source">
+                <span>{{ currentItem.source_type || currentItem.attribution?.origin_label || 'web' }}</span>
                 <span>· {{ formatRelativeTime(currentItem.created_at) }}</span>
-                <span class="mono">· {{ currentItem.id }}</span>
+                <span class="mono hide-xs">· {{ currentItem.id }}</span>
               </div>
             </div>
 
@@ -721,7 +849,7 @@ onBeforeUnmount(() => {
               <div class="chat-review-toolbar">
                 <div class="chat-review-title">
                   <Layers :size="16" class="accent-icon" />
-                  <strong>聊天记录审阅与 720px Canvas 切片引擎</strong>
+                  <strong>聊天记录审阅与 1080px 高清切片引擎</strong>
                 </div>
                 <div class="chat-review-btns">
                   <button
@@ -730,7 +858,7 @@ onBeforeUnmount(() => {
                     @click="showChatEditor = !showChatEditor"
                   >
                     <Edit3 :size="13" />
-                    {{ showChatEditor ? '完成脱敏编辑' : '编辑别名/脱敏' }}
+                    {{ showChatEditor ? '完成脱敏' : '脱敏编辑' }}
                   </button>
                   <button
                     type="button"
@@ -739,7 +867,7 @@ onBeforeUnmount(() => {
                     @click="generateChatSlicesPreview"
                   >
                     <Sparkles :size="13" />
-                    {{ renderingSlices ? '切片渲染中…' : '预览 WebP 切片' }}
+                    {{ renderingSlices ? '渲染中…' : '预览切片' }}
                   </button>
                 </div>
               </div>
@@ -775,7 +903,7 @@ onBeforeUnmount(() => {
               <div v-if="renderedSlices.length > 0" class="slices-preview">
                 <div class="slices-meta">
                   <span class="badge badge-success">
-                    已生成 {{ renderedSlices.length }} 张 WebP 切片（宽 720px，单张 ≤ 1800px，按完整气泡边界分页）
+                    已生成 {{ renderedSlices.length }} 张 WebP 切片（宽 1080px，单张 ≤ 1920px，按完整气泡边界分页）
                   </span>
                 </div>
                 <div class="slices-grid">
@@ -791,38 +919,129 @@ onBeforeUnmount(() => {
           </section>
         </div>
 
-        <!-- Right: Metadata Editor & Action Controls -->
+        <!-- Right: Always-On Fast Tagging, Metadata Editor & Action Controls -->
         <aside class="review-sidebar">
           <div class="card side-card">
-            <h3>审单编辑</h3>
+            <div class="side-head">
+              <h3>打标与审单</h3>
+              <span v-if="editTags.length > 0" class="badge badge-accent">
+                已选 {{ editTags.length }} 个标签
+              </span>
+            </div>
 
-            <label class="field">
-              <span class="field-label">标题</span>
-              <input v-model="editTitle" type="text" class="input" placeholder="可选简短标题" />
-            </label>
+            <!-- Always-Visible Fast Tagging Workbench (Top Priority!) -->
+            <div class="field tag-workbench">
+              <div class="field-head">
+                <span class="field-label tag-label-title">
+                  <Tag :size="13" /> 一键打标签 <span class="muted hide-xs">（直接按 1–9 切换）</span>
+                </span>
+                <div class="tag-head-actions">
+                  <button
+                    v-if="lastApprovedTags.length > 0"
+                    type="button"
+                    class="tag-mini-btn"
+                    title="复用上一条过审条目的标签 (快捷键 L)"
+                    @click="applyLastApprovedTags"
+                  >
+                    <CopyCheck :size="12" />
+                    复用上条
+                    <kbd class="hide-xs">L</kbd>
+                  </button>
+                  <button
+                    v-if="editTags.length > 0"
+                    type="button"
+                    class="tag-mini-btn danger"
+                    title="清空当前已选标签"
+                    @click="clearEditTags"
+                  >
+                    <Trash2 :size="12" />
+                    清空
+                  </button>
+                </div>
+              </div>
 
-            <label class="field">
-              <span class="field-label">一句话梗概（留空服务端自动截前 120 字）</span>
-              <textarea
-                v-model="editSummary"
-                class="textarea"
-                rows="2"
-                placeholder="供插件端纯文本 LLM 吐槽使用…"
-              />
-            </label>
+              <!-- Selected Tags Bar -->
+              <div v-if="editTags.length > 0" class="selected-tags">
+                <button
+                  v-for="t in editTags"
+                  :key="t"
+                  type="button"
+                  class="selected-tag-pill"
+                  title="点击移除该标签"
+                  @click="toggleTag(t)"
+                >
+                  <Hash :size="11" />
+                  <span>{{ t }}</span>
+                  <X :size="11" class="selected-tag-x" />
+                </button>
+              </div>
+              <div v-else class="empty-tags-hint muted">
+                点选下方标签或直接按数字键 <kbd>1</kbd>–<kbd>9</kbd> 快速打标
+              </div>
+
+              <!-- Always-Visible Quick Tag Grid -->
+              <div class="quick-tags-grid">
+                <button
+                  v-for="tag in visibleCatalogTags"
+                  :key="tag"
+                  type="button"
+                  class="quick-tag-chip"
+                  :class="{ active: editTags.includes(tag) }"
+                  @click="toggleTag(tag)"
+                >
+                  <kbd
+                    v-if="shortcutTags.indexOf(tag) !== -1"
+                    class="tag-kbd hide-xs"
+                  >
+                    {{ shortcutTags.indexOf(tag) + 1 }}
+                  </kbd>
+                  <span>{{ tag }}</span>
+                  <Check v-if="editTags.includes(tag)" :size="12" class="tag-check" />
+                </button>
+
+                <button
+                  v-if="hiddenTagCount > 0"
+                  type="button"
+                  class="quick-tag-chip more-chip"
+                  @click="showAllTags = !showAllTags"
+                >
+                  {{ showAllTags ? '收起' : `+${hiddenTagCount} 更多` }}
+                </button>
+              </div>
+
+              <!-- Custom Tag Batch Input (T to focus) -->
+              <form class="add-tag-row" @submit.prevent="addCustomTag(true)">
+                <div class="custom-tag-input-wrap">
+                  <input
+                    ref="tagInputRef"
+                    v-model="customTag"
+                    type="text"
+                    class="input tag-input"
+                    placeholder="按 T 输入/搜索标签，空格或逗号可批量添加…"
+                  />
+                  <button
+                    type="submit"
+                    class="btn btn-sm btn-primary tag-add-btn"
+                    :disabled="!customTag.trim()"
+                  >
+                    <Plus :size="14" /> 添加
+                  </button>
+                </div>
+              </form>
+            </div>
 
             <!-- NSFW Selector -->
             <div class="field">
               <div class="field-head">
                 <span class="field-label">分级 (nsfw_level)</span>
-                <kbd>N</kbd>
+                <kbd class="hide-xs">N</kbd>
               </div>
               <div class="nsfw-pills">
                 <button
                   v-for="lvl in ([0, 1, 2] as NsfwLevel[])"
                   :key="lvl"
                   type="button"
-                  class="chip"
+                  class="chip nsfw-chip"
                   :class="{ active: editNsfw === lvl }"
                   @click="editNsfw = lvl"
                 >
@@ -831,47 +1050,24 @@ onBeforeUnmount(() => {
               </div>
             </div>
 
-            <!-- Tags Editor -->
-            <div class="field">
-              <div class="field-head">
-                <span class="field-label">标签</span>
-                <button type="button" class="btn btn-sm btn-ghost" @click="showTagPicker = !showTagPicker">
-                  <kbd>T</kbd> {{ showTagPicker ? '收起' : '快选' }}
-                </button>
-              </div>
+            <!-- Optional Title & Summary -->
+            <label class="field">
+              <span class="field-label">标题（可选）</span>
+              <input v-model="editTitle" type="text" class="input" placeholder="可选简短标题" />
+            </label>
 
-              <div class="selected-tags">
-                <span v-if="editTags.length === 0" class="muted" style="font-size: 12.5px">暂无标签</span>
-                <span v-for="t in editTags" :key="t" class="badge badge-accent">
-                  <Hash :size="11" />{{ t }}
-                  <button type="button" class="tag-x" @click="toggleTag(t)">×</button>
-                </span>
-              </div>
+            <label class="field">
+              <span class="field-label">一句话梗概（留空自动截前 120 字）</span>
+              <textarea
+                v-model="editSummary"
+                class="textarea summary-area"
+                rows="2"
+                placeholder="供插件端纯文本 LLM 吐槽使用…"
+              />
+            </label>
 
-              <div v-if="showTagPicker" class="quick-tags-box">
-                <button
-                  v-for="(t, tIdx) in QUICK_TAGS"
-                  :key="t"
-                  type="button"
-                  class="chip"
-                  :class="{ active: editTags.includes(t) }"
-                  @click="toggleTag(t)"
-                >
-                  <kbd>{{ tIdx + 1 }}</kbd> {{ t }}
-                </button>
-                <form class="add-tag-row" @submit.prevent="addCustomTag">
-                  <input
-                    v-model="customTag"
-                    type="text"
-                    class="input"
-                    placeholder="输入新标签回车"
-                  />
-                </form>
-              </div>
-            </div>
-
-            <!-- Primary Review Action Buttons -->
-            <div class="action-stack">
+            <!-- Desktop Primary Review Action Buttons -->
+            <div class="action-stack desktop-actions">
               <div v-if="actionBusy" class="alert alert-info" style="font-size: 12.5px">
                 {{ busyStage || '处理中…' }}
               </div>
@@ -882,8 +1078,10 @@ onBeforeUnmount(() => {
                 :disabled="actionBusy"
                 @click="approveCurrent"
               >
-                <Check :size="17" />
-                <span>{{ chatBlock ? '渲染切片并通过' : '审核通过发布' }}</span>
+                <span class="action-btn-main">
+                  <Check :size="17" />
+                  <span>{{ chatBlock ? '渲染切片并通过' : '审核通过发布' }}</span>
+                </span>
                 <kbd>A</kbd>
               </button>
 
@@ -893,34 +1091,12 @@ onBeforeUnmount(() => {
                 :disabled="actionBusy"
                 @click="showRejectModal = !showRejectModal"
               >
-                <X :size="16" />
-                <span>拒绝条目</span>
+                <span class="action-btn-main">
+                  <X :size="16" />
+                  <span>拒绝条目</span>
+                </span>
                 <kbd>R</kbd>
               </button>
-
-              <!-- Quick Reject Sub-Key Drawer -->
-              <div v-if="showRejectModal" class="reject-drawer">
-                <div class="reject-title">选择拒绝原因（直接按数字键）：</div>
-                <button
-                  v-for="r in REJECT_REASONS"
-                  :key="r.code"
-                  type="button"
-                  class="btn btn-sm reject-opt"
-                  :disabled="actionBusy"
-                  @click="rejectCurrent(r.code)"
-                >
-                  <kbd>{{ r.key }}</kbd>
-                  <span>{{ r.label }}</span>
-                </button>
-                <form class="custom-reject-row" @submit.prevent="customRejectReason.trim() && rejectCurrent(customRejectReason.trim())">
-                  <input
-                    v-model="customRejectReason"
-                    type="text"
-                    class="input"
-                    placeholder="自定义原因回车拒绝…"
-                  />
-                </form>
-              </div>
 
               <button
                 type="button"
@@ -928,8 +1104,10 @@ onBeforeUnmount(() => {
                 :disabled="actionBusy || queue.length <= 1"
                 @click="skipCurrent"
               >
-                <SkipForward :size="15" />
-                <span>跳过看下一条</span>
+                <span class="action-btn-main">
+                  <SkipForward :size="15" />
+                  <span>跳过看下一条</span>
+                </span>
                 <kbd>Space</kbd>
               </button>
             </div>
@@ -937,6 +1115,115 @@ onBeforeUnmount(() => {
         </aside>
       </div>
     </template>
+
+    <!-- Sticky Mobile Review Action Dock (<= 920px) -->
+    <div
+      v-if="currentItem && activeMode !== 'killswitch'"
+      class="mobile-review-dock"
+      role="region"
+      aria-label="移动端快捷审核操作"
+    >
+      <div v-if="actionBusy" class="mobile-busy-banner">
+        {{ busyStage || '处理中…' }}
+      </div>
+      <div class="mobile-dock-row">
+        <button
+          type="button"
+          class="btn btn-success dock-btn-primary"
+          :disabled="actionBusy"
+          @click="approveCurrent"
+        >
+          <Check :size="16" />
+          <span>{{ chatBlock ? '切片通过' : '通过' }}</span>
+        </button>
+        <button
+          type="button"
+          class="btn btn-danger dock-btn"
+          :disabled="actionBusy"
+          @click="showRejectModal = true"
+        >
+          <X :size="16" />
+          <span>拒绝</span>
+        </button>
+        <button
+          type="button"
+          class="btn dock-btn-compact"
+          :disabled="actionBusy"
+          title="切换分级"
+          @click="cycleNsfw"
+        >
+          L{{ editNsfw }}
+        </button>
+        <button
+          type="button"
+          class="btn dock-btn-compact"
+          :disabled="actionBusy || queue.length <= 1"
+          title="跳过下一条"
+          @click="skipCurrent"
+        >
+          <SkipForward :size="15" />
+        </button>
+      </div>
+    </div>
+
+    <!-- Reject Reason Modal / Bottom Sheet (works cleanly on both Desktop & Mobile) -->
+    <Teleport to="body">
+      <div
+        v-if="showRejectModal && currentItem"
+        class="reject-backdrop"
+        @click="showRejectModal = false"
+      >
+        <div class="card reject-sheet" @click.stop>
+          <div class="reject-sheet-head">
+            <div>
+              <h3>选择拒绝原因</h3>
+              <p class="muted">桌面端可直接按数字键 1 / 2 / 3 快速拒审</p>
+            </div>
+            <button
+              type="button"
+              class="btn btn-sm btn-ghost"
+              aria-label="关闭"
+              @click="showRejectModal = false"
+            >
+              <X :size="16" />
+            </button>
+          </div>
+
+          <div class="reject-options">
+            <button
+              v-for="r in REJECT_REASONS"
+              :key="r.code"
+              type="button"
+              class="btn reject-opt"
+              :disabled="actionBusy"
+              @click="rejectCurrent(r.code)"
+            >
+              <kbd>{{ r.key }}</kbd>
+              <span>{{ r.label }}</span>
+            </button>
+          </div>
+
+          <form
+            class="custom-reject-row"
+            @submit.prevent="customRejectReason.trim() && rejectCurrent(customRejectReason.trim())"
+          >
+            <input
+              v-model="customRejectReason"
+              type="text"
+              class="input"
+              placeholder="输入自定义拒绝原因…"
+            />
+            <button
+              type="submit"
+              class="btn btn-danger"
+              :disabled="actionBusy || !customRejectReason.trim()"
+            >
+              确认拒绝
+            </button>
+          </form>
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>
 
@@ -957,10 +1244,18 @@ onBeforeUnmount(() => {
   flex-wrap: wrap;
 }
 
-.admin-topbar h1 {
+.topbar-title-group h1 {
   margin: 0;
   font-size: 24px;
   letter-spacing: -0.02em;
+}
+
+.operator-meta {
+  margin: 3px 0 0;
+  font-size: 13px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .topbar-actions {
@@ -973,14 +1268,19 @@ onBeforeUnmount(() => {
 .mode-switch {
   display: inline-flex;
   gap: 6px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+}
+
+.util-actions {
+  display: inline-flex;
+  gap: 6px;
 }
 
 .shortcut-bar {
   padding: 10px 16px;
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: 12px;
   flex-wrap: wrap;
   font-size: 13px;
 }
@@ -1006,6 +1306,20 @@ onBeforeUnmount(() => {
   font-size: 12.5px;
 }
 
+.mobile-progress-strip {
+  display: none;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.mobile-item-id {
+  font-size: 11.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .empty-queue {
   padding: 56px 24px;
   display: flex;
@@ -1026,7 +1340,7 @@ onBeforeUnmount(() => {
 
 .review-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1.55fr) minmax(300px, 0.85fr);
+  grid-template-columns: minmax(0, 1.48fr) minmax(330px, 0.92fr);
   gap: 18px;
   align-items: start;
 }
@@ -1035,6 +1349,7 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   gap: 14px;
+  min-width: 0;
 }
 
 .alerts-panel {
@@ -1056,7 +1371,7 @@ onBeforeUnmount(() => {
 .rep-item {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
+  gap: 6px;
   flex-wrap: wrap;
 }
 
@@ -1069,6 +1384,7 @@ onBeforeUnmount(() => {
   flex-direction: column;
   gap: 5px;
   flex: 1;
+  min-width: 0;
 }
 
 .warn-line {
@@ -1077,6 +1393,7 @@ onBeforeUnmount(() => {
   gap: 6px;
   flex-wrap: wrap;
   font-size: 13px;
+  word-break: break-all;
 }
 
 .inline-link {
@@ -1134,6 +1451,7 @@ onBeforeUnmount(() => {
 .chat-review-btns {
   display: inline-flex;
   gap: 8px;
+  flex-wrap: wrap;
 }
 
 .inline-chat-editor {
@@ -1155,6 +1473,7 @@ onBeforeUnmount(() => {
   width: 110px;
   padding: 6px 8px;
   font-size: 13px;
+  flex-shrink: 0;
 }
 
 .text-sm {
@@ -1205,7 +1524,14 @@ onBeforeUnmount(() => {
   gap: 14px;
 }
 
-.side-card h3 {
+.side-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.side-head h3 {
   margin: 0;
   font-size: 16px;
 }
@@ -1213,13 +1539,15 @@ onBeforeUnmount(() => {
 .field {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 7px;
 }
 
 .field-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .field-label {
@@ -1228,10 +1556,56 @@ onBeforeUnmount(() => {
   color: var(--text-secondary);
 }
 
-.nsfw-pills {
-  display: flex;
+.tag-workbench {
+  padding: 12px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+}
+
+.tag-label-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text);
+}
+
+.tag-head-actions {
+  display: inline-flex;
+  align-items: center;
   gap: 6px;
-  flex-wrap: wrap;
+}
+
+.tag-mini-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.14s ease;
+}
+
+.tag-mini-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.tag-mini-btn.danger:hover {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.tag-mini-btn kbd {
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  font-size: 10px;
 }
 
 .selected-tags {
@@ -1240,35 +1614,141 @@ onBeforeUnmount(() => {
   gap: 6px;
 }
 
-.tag-x {
-  border: none;
-  background: transparent;
-  color: inherit;
+.selected-tag-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: #ffffff;
+  font-size: 12.5px;
+  font-weight: 600;
   cursor: pointer;
-  padding: 0 0 0 2px;
-  font-weight: 700;
+  transition: opacity 0.14s ease, transform 0.12s ease;
 }
 
-.quick-tags-box {
+.selected-tag-pill:hover {
+  opacity: 0.9;
+}
+
+.selected-tag-x {
+  opacity: 0.85;
+  margin-left: 1px;
+}
+
+.empty-tags-hint {
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.empty-tags-hint kbd {
+  min-width: 18px;
+  height: 18px;
+  font-size: 10px;
+  padding: 0 4px;
+}
+
+.quick-tags-grid {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  padding: 10px;
-  border-radius: var(--radius-sm);
-  background: var(--bg-subtle);
+}
+
+.quick-tag-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 10px;
+  min-height: 32px;
+  border-radius: var(--radius-full);
   border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.14s ease;
+}
+
+.quick-tag-chip:hover {
+  border-color: var(--accent-border);
+  color: var(--text);
+  transform: translateY(-1px);
+}
+
+.quick-tag-chip.active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.quick-tag-chip.more-chip {
+  border-style: dashed;
+  color: var(--text-muted);
+}
+
+.tag-kbd {
+  min-width: 17px;
+  height: 17px;
+  padding: 0 4px;
+  font-size: 10px;
+  border-bottom-width: 1px;
+}
+
+.quick-tag-chip.active .tag-kbd {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #ffffff;
+}
+
+.tag-check {
+  color: var(--accent);
 }
 
 .add-tag-row {
   width: 100%;
-  margin-top: 4px;
+  margin-top: 2px;
+}
+
+.custom-tag-input-wrap {
+  display: flex;
+  gap: 6px;
+}
+
+.tag-input {
+  height: 34px;
+  padding: 0 10px;
+  font-size: 13px;
+}
+
+.tag-add-btn {
+  height: 34px;
+  flex-shrink: 0;
+}
+
+.nsfw-pills {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.nsfw-chip {
+  justify-content: center;
+  padding: 6px 8px;
+}
+
+.summary-area {
+  min-height: 64px;
 }
 
 .action-stack {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding-top: 8px;
+  padding-top: 10px;
   border-top: 1px solid var(--border);
 }
 
@@ -1277,43 +1757,222 @@ onBeforeUnmount(() => {
   justify-content: space-between;
 }
 
+.action-btn-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .action-btn kbd {
   background: rgba(255, 255, 255, 0.2);
   border-color: rgba(255, 255, 255, 0.35);
   color: inherit;
 }
 
-.reject-drawer {
-  padding: 10px;
-  border-radius: var(--radius-sm);
-  border: 1px solid rgba(220, 38, 38, 0.35);
-  background: var(--danger-soft);
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
+/* Sticky Mobile Action Dock */
+.mobile-review-dock {
+  display: none;
 }
 
-.reject-title {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--danger);
+/* Reject Modal / Bottom Sheet */
+.reject-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 130;
+  background: rgba(8, 11, 18, 0.56);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+
+.reject-sheet {
+  width: 100%;
+  max-width: 420px;
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  box-shadow: var(--shadow-lg);
+}
+
+.reject-sheet-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.reject-sheet-head h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.reject-sheet-head p {
+  margin: 3px 0 0;
+  font-size: 12.5px;
+}
+
+.reject-options {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 .reject-opt {
   justify-content: flex-start;
   width: 100%;
+  height: 42px;
 }
 
 .custom-reject-row {
-  margin-top: 2px;
+  display: flex;
+  gap: 8px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
 }
 
 @media (max-width: 920px) {
   .review-layout {
     grid-template-columns: 1fr;
   }
+
   .review-sidebar {
     position: static;
+  }
+
+  .desktop-actions {
+    display: none;
+  }
+
+  .admin-page.has-mobile-dock {
+    padding-bottom: 136px;
+  }
+
+  .mobile-review-dock {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    position: fixed;
+    left: 12px;
+    right: 12px;
+    bottom: 12px;
+    z-index: 55;
+    padding: 8px;
+    border-radius: var(--radius-md);
+    background: var(--bg-glass);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border: 1px solid var(--border-strong);
+    box-shadow: var(--shadow-lg);
+  }
+
+  .mobile-busy-banner {
+    font-size: 12px;
+    text-align: center;
+    color: var(--accent);
+    font-weight: 600;
+    padding: 2px 6px;
+  }
+
+  .mobile-dock-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .dock-btn-primary {
+    flex: 1.5;
+    height: 42px;
+  }
+
+  .dock-btn {
+    flex: 1;
+    height: 42px;
+  }
+
+  .dock-btn-compact {
+    width: 44px;
+    height: 42px;
+    padding: 0;
+    flex-shrink: 0;
+    font-family: var(--font-mono);
+    font-weight: 700;
+  }
+}
+
+@media (max-width: 760px) {
+  .shortcut-bar {
+    display: none;
+  }
+
+  .mobile-progress-strip {
+    display: flex;
+  }
+
+  .topbar-title-group h1 {
+    font-size: 21px;
+  }
+
+  .topbar-actions {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .mode-switch {
+    flex: 1;
+    overflow-x: auto;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .mode-switch::-webkit-scrollbar {
+    display: none;
+  }
+
+  .preview-card,
+  .side-card {
+    padding: 14px;
+  }
+
+  .inline-msg-row {
+    flex-direction: column;
+  }
+
+  .alias-sm {
+    width: 100%;
+  }
+}
+
+@media (max-width: 640px) {
+  .hide-xs {
+    display: none;
+  }
+
+  .admin-page.has-mobile-dock {
+    padding-bottom: 190px;
+  }
+
+  .mobile-review-dock {
+    bottom: calc(68px + env(safe-area-inset-bottom, 0px));
+  }
+
+  .quick-tag-chip {
+    min-height: 36px;
+    padding: 6px 12px;
+    font-size: 13px;
+  }
+
+  .reject-backdrop {
+    align-items: flex-end;
+    padding: 0;
+  }
+
+  .reject-sheet {
+    max-width: none;
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+    padding-bottom: calc(20px + env(safe-area-inset-bottom, 0px));
   }
 }
 </style>

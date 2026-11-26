@@ -125,9 +125,14 @@ onMounted(loadItem);
       </div>
 
       <div v-if="item.tags?.length" class="tag-row">
-        <span v-for="tag in item.tags" :key="tag" class="badge">
+        <RouterLink
+          v-for="tag in item.tags"
+          :key="tag"
+          :to="{ path: '/', query: { tag } }"
+          class="badge tag-link"
+        >
           <Hash :size="11" />{{ tag }}
-        </span>
+        </RouterLink>
       </div>
 
       <footer class="detail-foot">
@@ -276,5 +281,37 @@ onMounted(loadItem);
 
 .danger-icon {
   color: var(--danger);
+}
+
+.tag-link {
+  transition: all 0.14s ease;
+}
+
+.tag-link:hover {
+  background: var(--accent-soft);
+  border-color: var(--accent-border);
+  color: var(--accent);
+}
+
+@media (max-width: 640px) {
+  .detail-page {
+    padding-top: 14px;
+  }
+
+  .detail-card {
+    padding: 16px;
+    gap: 13px;
+  }
+
+  .detail-title {
+    font-size: 20px;
+  }
+
+  .id-chip {
+    max-width: 160px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
 }
 </style>

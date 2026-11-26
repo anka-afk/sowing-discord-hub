@@ -225,4 +225,39 @@ function handlePreviewImage(part: { url?: string; media_id?: string }) {
   overflow: hidden;
   max-width: 100%;
 }
+
+@media (max-width: 520px) {
+  .chat-sim-header {
+    padding: 8px 11px;
+  }
+
+  .chat-sim-body,
+  .compact .chat-sim-body {
+    padding: 10px;
+    gap: 10px;
+  }
+
+  .chat-row {
+    gap: 8px;
+  }
+
+  .chat-avatar {
+    width: 28px;
+    height: 28px;
+    font-size: 12px;
+  }
+
+  .chat-bubble {
+    padding: 8px 10px;
+    border-radius: 10px;
+  }
+
+  .chat-text {
+    font-size: 13.5px;
+  }
+
+  .chat-inline-img {
+    max-height: 440px;
+  }
+}
 </style>
