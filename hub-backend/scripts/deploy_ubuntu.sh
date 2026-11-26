@@ -125,15 +125,24 @@ echo ""
 
 echo "=== 9. Install cloudflared & start cardless tunnel login ==="
 if ! command -v cloudflared >/dev/null 2>&1; then
-  curl -L -s --max-time 120 -o /usr/local/bin/cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
-  chmod +x /usr/local/bin/cloudflared
+  echo "Installing cloudflared via official Cloudflare apt repo..."
+  mkdir -p --mode=0755 /usr/share/keyrings
+  if curl -fsSL --max-time 30 https://pkg.cloudflare.com/cloudflare-main.gpg -o /usr/share/keyrings/cloudflare-main.gpg; then
+    echo 'deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared any main' > /etc/apt/sources.list.d/cloudflared.list
+    apt-get update -qq && apt-get install -y -qq cloudflared >/dev/null || true
+  fi
+  if ! command -v cloudflared >/dev/null 2>&1; then
+    echo "Fallback: downloading cloudflared binary..."
+    curl -fsSL --max-time 120 -o /usr/local/bin/cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+    chmod +x /usr/local/bin/cloudflared
+  fi
 fi
 cloudflared --version
 
 if [ ! -f /root/.cloudflared/cert.pem ]; then
   pkill -f "cloudflared tunnel login" 2>/dev/null || true
   rm -f /tmp/cf_login.log
-  setsid /usr/local/bin/cloudflared tunnel login >/tmp/cf_login.log 2>&1 </dev/null &
+  setsid "$(command -v cloudflared)" tunnel login >/tmp/cf_login.log 2>&1 </dev/null &
   sleep 4
   echo "=== 请复制下方链接在浏览器打开并授权 ankaanka.org ==="
   cat /tmp/cf_login.log
