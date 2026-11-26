@@ -59,7 +59,9 @@ class OneBotWSClient:
             self._pending_actions.pop(echo, None)
 
     async def get_msg(self, message_id: str | int) -> dict[str, Any]:
-        return await self.call_action("get_msg", {"message_id": int(message_id) if str(message_id).isdigit() else message_id})
+        mid_str = str(message_id)
+        mid_val: int | str = int(mid_str) if mid_str.lstrip("-").isdigit() else mid_str
+        return await self.call_action("get_msg", {"message_id": mid_val})
 
     async def get_forward_msg(self, forward_id: str) -> list[dict[str, Any]]:
         data = await self.call_action("get_forward_msg", {"id": forward_id, "message_id": forward_id})

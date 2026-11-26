@@ -54,7 +54,7 @@ async def seed_groups(config_path: str, per_group: int = 15, max_total_accepted:
         echo_seq += 1
         return f"{prefix}_{echo_seq}"
 
-    async with websockets.connect(ws_url, open_timeout=10, max_size=32 * 1024 * 1024) as ws:
+    async with websockets.connect(ws_url, ping_interval=None, open_timeout=10, max_size=32 * 1024 * 1024) as ws:
         async def get_msg(mid: str) -> dict[str, Any]:
             res = await _call_onebot(ws, "get_msg", {"message_id": int(mid) if str(mid).lstrip("-").isdigit() else mid}, _next_echo("getmsg"))
             return res.get("data") or {}
