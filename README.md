@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 
-配套 [astrbot_sowing_discord v2](https://github.com/anka-afk/astrbot_sowing_discord/tree/v2) 的中心化公益内容站、极速人工审核台与单官方号投稿群初筛采集器。
+配套 [astrbot_sowing_discord v2](https://github.com/anka-afk/astrbot_sowing_discord) 的中心化公益内容站、极速人工审核台与单官方号投稿群初筛采集器。
 
 - **前端网站 & 键盘流审核台（推荐域名）**：`https://banshi.ankaanka.org`（Cloudflare Pages）
 - **后端 API（推荐域名）**：`https://banshi-api.ankaanka.org`（免费 Cloudflare Tunnel / 1C2G VPS + Caddy）
