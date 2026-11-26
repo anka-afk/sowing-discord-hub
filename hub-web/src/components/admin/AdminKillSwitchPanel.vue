@@ -125,7 +125,7 @@ onMounted(loadApproved);
           </div>
 
           <div class="ks-row-actions">
-            <RouterLink :to="`/m/${item.id}`" target="_blank" class="btn btn-sm btn-ghost">
+            <RouterLink :to="`/m/${item.id}`" target="_blank" rel="noopener noreferrer" class="btn btn-sm btn-ghost">
               <ExternalLink :size="13" /> 查看
             </RouterLink>
             <button

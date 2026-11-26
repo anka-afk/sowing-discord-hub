@@ -152,7 +152,14 @@ const previewChatMessages = computed<ChatMessageNode[]>(() =>
 );
 
 const privacyWarnings = computed(() => {
-  const texts: string[] = [title.value, captionText.value, videoNote.value];
+  const texts: string[] = [
+    title.value,
+    submitterName.value,
+    captionText.value,
+    videoTitle.value,
+    videoUrl.value,
+    videoNote.value,
+  ];
   if (activeTab.value === 'chat') {
     for (const row of chatRows.value) {
       texts.push(row.sender_alias, row.text);

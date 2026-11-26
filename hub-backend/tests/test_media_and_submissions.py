@@ -63,8 +63,17 @@ def test_gif_preserved_and_comments_stripped(client):
     assert data["mime"] == "image/gif"
     assert data["duplicate"] is False
 
-    prev = client.get(f"/api/v1/admin/media/{data['media_id']}?token={admin_token}")
+    # Query-string full JWT (?token=) must be rejected
+    prev_qs = client.get(f"/api/v1/admin/media/{data['media_id']}?token={admin_token}")
+    assert prev_qs.status_code == 401
+
+    # Bearer header succeeds with private no-store cache headers
+    prev = client.get(
+        f"/api/v1/admin/media/{data['media_id']}",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
     assert prev.status_code == 200
+    assert prev.headers["cache-control"] == "private, no-store"
     assert prev.headers["content-type"] == "image/gif"
     assert b"my-secret-comment" not in prev.content
     with Image.open(io.BytesIO(prev.content)) as out_gif:
@@ -233,7 +242,11 @@ def test_submission_block_guards_and_user_token_priority(client):
     )
     assert r_nested.status_code == 422
 
-    # 6. X-User-Token gives higher trust_level so item sorts ahead in admin queue
+    # 6. Pre-registered X-User-Token gives higher trust_level so item sorts ahead in admin queue;
+    #    unregistered arbitrary X-User-Token must NOT auto-elevate trust_level!
+    from app.cli_admin import register_user_token
+
+    register_user_token(client.app.state.db, client.app.state.settings, "trusted-contributor-token-999", trust_level=1)
     r_vip = client.post(
         "/api/v1/submissions",
         headers={"X-User-Token": "trusted-contributor-token-999"},

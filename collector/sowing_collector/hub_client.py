@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import secrets
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -18,19 +19,28 @@ def build_hmac_headers(
     raw_body: bytes,
     *,
     timestamp: int | None = None,
+    nonce: str | None = None,
 ) -> dict[str, str]:
-    """Compute X-Collector-Timestamp & X-Collector-Signature per Hub backend contract.
+    """Compute X-Collector-Timestamp, optional X-Collector-Nonce & X-Collector-Signature.
 
-    Canonical string: f"{timestamp}.{METHOD}.{path}.{sha256_hex(raw_body)}"
+    Canonical string:
+      - with nonce:    f"{timestamp}.{nonce}.{METHOD}.{path}.{sha256_hex(raw_body)}"
+      - without nonce: f"{timestamp}.{METHOD}.{path}.{sha256_hex(raw_body)}"
     """
     ts = str(int(time.time()) if timestamp is None else int(timestamp))
     body_sha256 = hashlib.sha256(raw_body).hexdigest()
-    canonical = f"{ts}.{method.upper()}.{path}.{body_sha256}"
+    if nonce:
+        canonical = f"{ts}.{nonce}.{method.upper()}.{path}.{body_sha256}"
+    else:
+        canonical = f"{ts}.{method.upper()}.{path}.{body_sha256}"
     sig = hmac.new(secret.encode("utf-8"), canonical.encode("utf-8"), hashlib.sha256).hexdigest()
-    return {
+    hdrs = {
         "X-Collector-Timestamp": ts,
         "X-Collector-Signature": sig,
     }
+    if nonce:
+        hdrs["X-Collector-Nonce"] = nonce
+    return hdrs
 
 
 @dataclass
@@ -64,7 +74,12 @@ class HubCollectorClient:
         self.media_endpoint = media_endpoint
         self.ingest_endpoint = ingest_endpoint
         self._owns_client = client is None
-        self._client = client or httpx.AsyncClient(base_url=self.base_url, timeout=timeout_sec)
+        self._client = client or httpx.AsyncClient(
+            base_url=self.base_url,
+            timeout=timeout_sec,
+            follow_redirects=False,
+            trust_env=False,
+        )
 
     async def aclose(self) -> None:
         if self._owns_client:
@@ -95,9 +110,22 @@ class HubCollectorClient:
         # Materialize exact wire bytes (critical for multipart/form-data HMAC alignment)
         raw_body = await req.aread()
         url_path = urlparse(str(req.url)).path
-        sig_headers = build_hmac_headers(self.shared_secret, method.upper(), url_path, raw_body)
+        nonce = secrets.token_hex(16)
+        sig_headers = build_hmac_headers(
+            self.shared_secret,
+            method.upper(),
+            url_path,
+            raw_body,
+            nonce=nonce,
+        )
         req.headers.update(sig_headers)
-        resp = await self._client.send(req)
+        resp = await self._client.send(req, follow_redirects=False)
+        if 300 <= resp.status_code < 400:
+            raise httpx.HTTPStatusError(
+                f"Unexpected redirect ({resp.status_code}) from Hub",
+                request=req,
+                response=resp,
+            )
         resp.raise_for_status()
         return resp
 
@@ -114,7 +142,7 @@ class HubCollectorClient:
         )
         body = resp.json()
         return MediaUploadResponse(
-            media_id=str(body.get("media_id", "")),
+            media_id=str(body.get("media_id") or ""),
             mime=str(body.get("mime", mime)),
             w=int(body.get("w", 0)),
             h=int(body.get("h", 0)),

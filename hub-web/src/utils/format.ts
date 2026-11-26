@@ -79,6 +79,20 @@ export function detectVideoPlatform(url: string): string {
   }
 }
 
+export function safeHttpUrl(url?: string | null): string | null {
+  if (!url) return null;
+  const trimmed = url.trim();
+  if (!trimmed || /[\u0000-\u001f\u007f\\]/.test(trimmed)) return null;
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+    if (parsed.username || parsed.password) return null;
+    return parsed.href;
+  } catch {
+    return null;
+  }
+}
+
 export interface LocalPrivacyMatch {
   label: string;
   excerpt: string;
@@ -91,17 +105,33 @@ export function scanLocalPrivacyRisks(text: string): LocalPrivacyMatch[] {
   const findings: LocalPrivacyMatch[] = [];
   if (!text) return findings;
 
-  const patterns: Array<{ label: string; regex: RegExp }> = [
-    { label: '疑似手机号', regex: /(?<!\d)1[3-9]\d{9}(?!\d)/g },
-    { label: '疑似邮箱', regex: /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g },
+  const seen = new Set<string>();
+  const addFinding = (label: string, excerpt: string) => {
+    const key = `${label}:${excerpt}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      findings.push({ label, excerpt });
+    }
+  };
+
+  const patterns: Array<{ label: string; regex: RegExp; filter?: (m: RegExpExecArray) => boolean }> = [
     { label: '疑似身份证号', regex: /(?<!\d)[1-9]\d{5}(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[\dXx](?!\d)/g },
-    { label: '疑似 QQ/群号', regex: /(?:QQ|qq|群号|加群|联系)[^\d]{0,4}([1-9]\d{4,11})/g },
+    { label: '疑似手机号', regex: /(?<!\d)1[3-9]\d[\s-]?\d{4}[\s-]?\d{4}(?!\d)/g },
+    { label: '疑似邮箱', regex: /(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]{1,64}@(?:[A-Za-z0-9-]{1,63}\.)+[A-Za-z]{2,24}(?![A-Za-z])/g },
+    { label: '疑似微信号', regex: /(?:微信号|微信|(?<![A-Za-z0-9])(?:vx|VX|wx|WX|[Ww]e[Cc]hat))(?:\s{0,4}[:：]\s{0,4}|\s{0,4})([a-zA-Z][a-zA-Z0-9_-]{5,19})/g },
+    { label: '疑似 QQ/群号', regex: /(?:QQ|qq|扣扣|群号|加群|联系|加我)[^\d]{0,6}([1-9]\d{4,11})(?!\d)/g },
+    {
+      label: '疑似 QQ/群号',
+      regex: /(?<!\d)([1-9]\d{6,10})(?!\d)/g,
+      filter: (m) => !(m[1].length === 8 && (m[1].startsWith('19') || m[1].startsWith('20'))),
+    },
   ];
 
-  for (const { label, regex } of patterns) {
+  for (const { label, regex, filter } of patterns) {
     let m: RegExpExecArray | null;
     while ((m = regex.exec(text)) !== null) {
-      findings.push({ label, excerpt: m[0] });
+      if (filter && !filter(m)) continue;
+      addFinding(label, m[0]);
     }
   }
   return findings;

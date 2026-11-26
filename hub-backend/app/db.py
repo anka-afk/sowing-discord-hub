@@ -41,6 +41,8 @@ CREATE TABLE IF NOT EXISTS items (
     score REAL NOT NULL DEFAULT 0.0,
     reviewer_id TEXT,
     reject_reason TEXT,
+    reviewed_at TEXT,
+    review_epoch INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     published_at TEXT,
     updated_at TEXT NOT NULL
@@ -73,6 +75,7 @@ CREATE TABLE IF NOT EXISTS media_assets (
     h INTEGER NOT NULL DEFAULT 0,
     size_bytes INTEGER NOT NULL DEFAULT 0,
     visibility TEXT NOT NULL DEFAULT 'private',
+    uploader_hash TEXT NOT NULL DEFAULT '',
     is_deleted INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL
 );
@@ -98,6 +101,7 @@ CREATE TABLE IF NOT EXISTS feedback_events (
     group_hash TEXT NOT NULL,
     action TEXT NOT NULL,
     reason TEXT,
+    review_epoch INTEGER NOT NULL DEFAULT 0,
     occurred_at TEXT NOT NULL,
     created_at TEXT NOT NULL,
     UNIQUE(item_id, instance_id, voter_hash, action)
@@ -121,6 +125,7 @@ CREATE TABLE IF NOT EXISTS admins (
     password_hash TEXT NOT NULL,
     role TEXT NOT NULL DEFAULT 'moderator',
     is_active INTEGER NOT NULL DEFAULT 1,
+    token_version INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL
 );
 
@@ -175,8 +180,30 @@ class Database:
             conn = self._connect()
             try:
                 conn.executescript(SCHEMA_SQL)
+                self._apply_migrations(conn)
             finally:
                 conn.close()
+
+    @staticmethod
+    def _ensure_column(
+        conn: sqlite3.Connection,
+        table: str,
+        column: str,
+        col_def: str,
+    ) -> None:
+        cols = {
+            row["name"]
+            for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        if column not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_def}")
+
+    def _apply_migrations(self, conn: sqlite3.Connection) -> None:
+        self._ensure_column(conn, "admins", "token_version", "INTEGER NOT NULL DEFAULT 1")
+        self._ensure_column(conn, "media_assets", "uploader_hash", "TEXT NOT NULL DEFAULT ''")
+        self._ensure_column(conn, "items", "reviewed_at", "TEXT")
+        self._ensure_column(conn, "items", "review_epoch", "INTEGER NOT NULL DEFAULT 0")
+        self._ensure_column(conn, "feedback_events", "review_epoch", "INTEGER NOT NULL DEFAULT 0")
 
     @contextmanager
     def read(self) -> Iterator[sqlite3.Connection]:
@@ -222,6 +249,13 @@ class Database:
         return int(row["current_seq"]) if row else 0
 
     def seed_admin(self, settings: Settings, password_hasher) -> None:
+        if not settings.admin_password:
+            return
+        if settings.is_production and (
+            settings.admin_password == "admin123456"
+            or len(settings.admin_password) < 12
+        ):
+            return
         with self.write() as conn:
             existing = conn.execute(
                 "SELECT id FROM admins WHERE username = ?",
@@ -236,8 +270,8 @@ class Database:
             pwd_hash = password_hasher(settings.admin_password)
             conn.execute(
                 """
-                INSERT INTO admins (id, username, password_hash, role, is_active, created_at)
-                VALUES (?, ?, ?, 'super_admin', 1, ?)
+                INSERT INTO admins (id, username, password_hash, role, is_active, token_version, created_at)
+                VALUES (?, ?, ?, 'super_admin', 1, 1, ?)
                 """,
                 (admin_id, settings.admin_username, pwd_hash, utc_now_iso()),
             )

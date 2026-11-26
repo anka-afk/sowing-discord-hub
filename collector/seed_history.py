@@ -8,7 +8,6 @@ import json
 import logging
 from collections import Counter
 from typing import Any
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import websockets
 
@@ -16,19 +15,10 @@ from sowing_collector.config import load_config
 from sowing_collector.dedup import DedupStore
 from sowing_collector.desensitizer import normalize_segments
 from sowing_collector.hub_client import HubCollectorClient
-from sowing_collector.pipeline import CollectorPipeline
+from sowing_collector.pipeline import CollectorPipeline, _hash_source_msg_id
 from sowing_collector.triggers import TriggerCandidate
 
 logger = logging.getLogger("sowing_collector.seed")
-
-
-def _build_ws_url(ws_url: str, access_token: str) -> str:
-    if not access_token:
-        return ws_url
-    parsed = urlparse(ws_url)
-    query = dict(parse_qsl(parsed.query))
-    query.setdefault("access_token", access_token)
-    return urlunparse(parsed._replace(query=urlencode(query)))
 
 
 async def _call_onebot(ws: Any, action: str, params: dict[str, Any], echo: str, timeout: float = 20.0) -> dict[str, Any]:
@@ -43,7 +33,11 @@ async def _call_onebot(ws: Any, action: str, params: dict[str, Any], echo: str, 
 async def seed_groups(config_path: str, per_group: int = 15, max_total_accepted: int = 60) -> dict[str, Any]:
     cfg = load_config(config_path)
     dedup = DedupStore(db_path=cfg.storage.db_path, phash_threshold=cfg.filters.phash_hamming_threshold)
-    ws_url = _build_ws_url(cfg.onebot.ws_url, cfg.onebot.access_token)
+    ws_headers = (
+        {"Authorization": f"Bearer {cfg.onebot.access_token}"}
+        if cfg.onebot.access_token
+        else None
+    )
 
     stats = Counter()
     accepted_ids: list[str] = []
@@ -54,88 +48,101 @@ async def seed_groups(config_path: str, per_group: int = 15, max_total_accepted:
         echo_seq += 1
         return f"{prefix}_{echo_seq}"
 
-    async with websockets.connect(ws_url, ping_interval=None, open_timeout=10, max_size=32 * 1024 * 1024) as ws:
-        async def get_msg(mid: str) -> dict[str, Any]:
-            res = await _call_onebot(ws, "get_msg", {"message_id": int(mid) if str(mid).lstrip("-").isdigit() else mid}, _next_echo("getmsg"))
-            return res.get("data") or {}
+    try:
+        async with websockets.connect(
+            cfg.onebot.ws_url,
+            additional_headers=ws_headers,
+            ping_interval=None,
+            open_timeout=10,
+            max_size=32 * 1024 * 1024,
+        ) as ws:
+            async def get_msg(mid: str) -> dict[str, Any]:
+                res = await _call_onebot(ws, "get_msg", {"message_id": int(mid) if str(mid).lstrip("-").isdigit() else mid}, _next_echo("getmsg"))
+                return res.get("data") or {}
 
-        async def get_forward_msg(fid: str) -> list[dict[str, Any]]:
-            res = await _call_onebot(ws, "get_forward_msg", {"id": fid, "message_id": fid}, _next_echo("fwd"))
-            data = res.get("data") or {}
-            return data.get("messages") or data.get("message") or []
+            async def get_forward_msg(fid: str) -> list[dict[str, Any]]:
+                res = await _call_onebot(ws, "get_forward_msg", {"id": fid, "message_id": fid}, _next_echo("fwd"))
+                data = res.get("data") or {}
+                return data.get("messages") or data.get("message") or []
 
-        async with HubCollectorClient(
-            base_url=cfg.hub.base_url,
-            shared_secret=cfg.hub.shared_secret,
-            timeout_sec=cfg.hub.timeout_sec,
-        ) as hub_client:
-            pipeline = CollectorPipeline(
-                cfg,
-                hub_client,
-                dedup,
-                get_msg=get_msg,
-                get_forward_msg=get_forward_msg,
-            )
+            async with HubCollectorClient(
+                base_url=cfg.hub.base_url,
+                shared_secret=cfg.hub.shared_secret,
+                timeout_sec=cfg.hub.timeout_sec,
+            ) as hub_client:
+                pipeline = CollectorPipeline(
+                    cfg,
+                    hub_client,
+                    dedup,
+                    get_msg=get_msg,
+                    get_forward_msg=get_forward_msg,
+                )
 
-            for gid in cfg.onebot.watch_groups:
-                if len(accepted_ids) >= max_total_accepted:
-                    break
-                try:
-                    hist = await _call_onebot(
-                        ws,
-                        "get_group_msg_history",
-                        {"group_id": int(gid), "count": per_group},
-                        _next_echo(f"hist_{gid}"),
-                    )
-                except Exception as exc:
-                    logger.warning("Failed history fetch for group %s: %s", gid, exc)
-                    stats["history_fetch_error"] += 1
-                    continue
-
-                msgs = (hist.get("data") or {}).get("messages") or []
-                logger.info("Group %s: fetched %d historical messages", gid, len(msgs))
-                for m in msgs:
+                for group_idx, gid in enumerate(cfg.onebot.watch_groups, start=1):
                     if len(accepted_ids) >= max_total_accepted:
                         break
-                    mid = m.get("message_id")
-                    if mid is None:
-                        continue
-                    segs = normalize_segments(m.get("message") or m.get("raw_message") or [])
-                    if not segs:
-                        continue
-                    has_media_or_forward = any(s.get("type") in ("image", "forward") for s in segs)
-                    plain_len = sum(
-                        len(str(s.get("data", {}).get("text", "")).strip())
-                        for s in segs
-                        if s.get("type") == "text"
-                    )
-                    if not has_media_or_forward and plain_len < cfg.triggers.ingest_all_min_text_without_media:
-                        stats["skipped_noise"] += 1
-                        continue
-
-                    candidate = TriggerCandidate(
-                        trigger_source="cold_start_history",
-                        group_id=int(gid),
-                        message_id=str(mid),
-                        sender_user_id=m.get("user_id") or 0,
-                        inline_segments=segs,
-                        extra_tags=[],
-                    )
                     try:
-                        outcome = await pipeline.process_candidate(candidate)
+                        hist = await _call_onebot(
+                            ws,
+                            "get_group_msg_history",
+                            {"group_id": int(gid), "count": per_group},
+                            _next_echo(f"hist_{group_idx}"),
+                        )
                     except Exception as exc:
-                        logger.warning("Error seeding group=%s mid=%s: %s", gid, mid, exc)
-                        stats[f"error:{type(exc).__name__}"] += 1
+                        logger.warning("Failed history fetch for watched group #%d: %s", group_idx, type(exc).__name__)
+                        stats["history_fetch_error"] += 1
                         continue
-                    if outcome.accepted:
-                        stats["accepted"] += 1
-                        if outcome.submission_id:
-                            accepted_ids.append(outcome.submission_id)
-                        logger.info("Seeded %s (group=%s mid=%s)", outcome.submission_id, gid, mid)
-                    else:
-                        stats[f"skip:{outcome.reason}"] += 1
 
-    dedup.close()
+                    msgs = (hist.get("data") or {}).get("messages") or []
+                    logger.info("Watched group #%d: fetched %d historical messages", group_idx, len(msgs))
+                    for m in msgs:
+                        if len(accepted_ids) >= max_total_accepted:
+                            break
+                        mid = m.get("message_id")
+                        if mid is None:
+                            continue
+                        segs = normalize_segments(m.get("message") or m.get("raw_message") or [])
+                        if not segs:
+                            continue
+                        has_media_or_forward = any(s.get("type") in ("image", "forward") for s in segs)
+                        plain_len = sum(
+                            len(str(s.get("data", {}).get("text", "")).strip())
+                            for s in segs
+                            if s.get("type") == "text"
+                        )
+                        if not has_media_or_forward and plain_len < cfg.triggers.ingest_all_min_text_without_media:
+                            stats["skipped_noise"] += 1
+                            continue
+
+                        candidate = TriggerCandidate(
+                            trigger_source="cold_start_history",
+                            group_id=int(gid),
+                            message_id=str(mid),
+                            sender_user_id=m.get("user_id") or 0,
+                            inline_segments=segs,
+                            extra_tags=[],
+                        )
+                        msg_ref = _hash_source_msg_id(int(gid), str(mid), cfg.hub.submitter_salt)
+                        try:
+                            outcome = await pipeline.process_candidate(candidate)
+                        except Exception as exc:
+                            logger.warning(
+                                "Error seeding watched group #%d (%s): %s",
+                                group_idx,
+                                msg_ref,
+                                type(exc).__name__,
+                            )
+                            stats[f"error:{type(exc).__name__}"] += 1
+                            continue
+                        if outcome.accepted:
+                            stats["accepted"] += 1
+                            if outcome.submission_id:
+                                accepted_ids.append(outcome.submission_id)
+                            logger.info("Seeded %s (group #%d, ref=%s)", outcome.submission_id, group_idx, msg_ref)
+                        else:
+                            stats[f"skip:{outcome.reason}"] += 1
+    finally:
+        dedup.close()
     return {"accepted_count": len(accepted_ids), "accepted_ids": accepted_ids, "stats": dict(stats)}
 
 

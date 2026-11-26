@@ -36,10 +36,14 @@ def _make_png(variant: int = 0) -> bytes:
 def _verify_hmac(secret: str, request: httpx.Request) -> bool:
     ts = request.headers.get("X-Collector-Timestamp")
     sig = request.headers.get("X-Collector-Signature")
+    nonce = request.headers.get("X-Collector-Nonce")
     if not ts or not sig:
         return False
     body_sha = hashlib.sha256(request.content).hexdigest()
-    canonical = f"{ts}.{request.method.upper()}.{request.url.path}.{body_sha}"
+    if nonce:
+        canonical = f"{ts}.{nonce}.{request.method.upper()}.{request.url.path}.{body_sha}"
+    else:
+        canonical = f"{ts}.{request.method.upper()}.{request.url.path}.{body_sha}"
     expected = hmac.new(secret.encode("utf-8"), canonical.encode("utf-8"), hashlib.sha256).hexdigest()
     return hmac.compare_digest(sig, expected)
 
@@ -143,7 +147,8 @@ async def test_pipeline_hmac_upload_and_ingest_and_dedup():
         assert ingested["blocks"][0] == {"type": "text", "text": "群里刚发的神图"}
         assert ingested["blocks"][1]["type"] == "image"
         assert ingested["blocks"][1]["media_id"] == "media-1"
-        assert ingested["source_msg_id"] == "1001:500"
+        assert ingested["source_msg_id"].startswith("msg_")
+        assert "1001" not in ingested["source_msg_id"]
 
         # 2. Same image submitted again in another message -> blocked locally before hitting Hub!
         outcome2 = await pipeline.handle_event(

@@ -14,14 +14,15 @@ if ! cloudflared tunnel info "${TUNNEL_NAME}" >/dev/null 2>&1; then
   cloudflared tunnel create "${TUNNEL_NAME}"
 fi
 
-TUNNEL_ID=$(cloudflared tunnel list --output json | /opt/sowing-discord-hub/hub-backend/.venv/bin/python -c "
+TUNNEL_ID=$(cloudflared tunnel list --output json | /opt/sowing-discord-hub/hub-backend/.venv/bin/python -c '
 import json, sys
+target = sys.argv[1]
 items = json.load(sys.stdin)
 for it in items:
-    if it.get('name') == '${TUNNEL_NAME}':
-        print(it['id'])
+    if it.get("name") == target:
+        print(it["id"])
         break
-")
+' "${TUNNEL_NAME}")
 
 if [ -z "$TUNNEL_ID" ]; then
   echo "ERROR: Could not find tunnel ID for ${TUNNEL_NAME}"

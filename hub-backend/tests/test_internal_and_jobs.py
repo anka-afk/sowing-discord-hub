@@ -79,8 +79,22 @@ def test_collector_hmac_media_and_ingest(client, test_settings):
     assert ing_data["status"] == "pending"
     assert ing_data["duplicate"] is False
 
-    # 5. Re-ingesting exact same payload deduplicates cleanly
-    ing2 = client.post("/api/v1/internal/collector/ingest", content=ingest_payload, headers=ing_hdrs)
+    # 5. Replaying exact same signed request headers is rejected (anti-replay)
+    ing_replay = client.post("/api/v1/internal/collector/ingest", content=ingest_payload, headers=ing_hdrs)
+    assert ing_replay.status_code == 401
+
+    # 6. Re-ingesting same payload with fresh nonce deduplicates cleanly
+    ing_hdrs_fresh = {
+        "Content-Type": "application/json",
+        **collector_headers(
+            secret,
+            "POST",
+            "/api/v1/internal/collector/ingest",
+            ingest_payload,
+            nonce="fresh-nonce-002",
+        ),
+    }
+    ing2 = client.post("/api/v1/internal/collector/ingest", content=ingest_payload, headers=ing_hdrs_fresh)
     assert ing2.status_code == 201
     assert ing2.json()["duplicate"] is True
     assert ing2.json()["submission_id"] == ing_data["submission_id"]

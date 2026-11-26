@@ -170,6 +170,7 @@ class AdminReviewRequest(BaseModel):
     rendered_images: list[RenderedImageRef | str] | None = None
     chat_renders: dict[str, list[str]] | None = None
     edited_chat_messages: list[dict[str, Any]] | None = None
+    edited_text_blocks: dict[str, str] | None = None
 
 
 class AdminReviewResponse(BaseModel):

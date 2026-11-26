@@ -138,10 +138,20 @@ def make_animated_gif_bytes(
     return buf.getvalue()
 
 
-def collector_headers(secret: str, method: str, path: str, body: bytes, ts: int | None = None) -> dict[str, str]:
+def collector_headers(
+    secret: str,
+    method: str,
+    path: str,
+    body: bytes,
+    ts: int | None = None,
+    nonce: str | None = None,
+) -> dict[str, str]:
     timestamp = str(int(time.time()) if ts is None else ts)
-    sig = compute_collector_signature(secret, timestamp, method, path, body)
-    return {
+    sig = compute_collector_signature(secret, timestamp, method, path, body, nonce=nonce)
+    hdrs = {
         "X-Collector-Timestamp": timestamp,
         "X-Collector-Signature": sig,
     }
+    if nonce:
+        hdrs["X-Collector-Nonce"] = nonce
+    return hdrs

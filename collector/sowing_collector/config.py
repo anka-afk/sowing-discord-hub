@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -22,6 +25,7 @@ class OneBotConfig:
     ws_url: str = "ws://127.0.0.1:3001"
     access_token: str = ""
     watch_groups: list[int] = field(default_factory=list)
+    allow_all_groups: bool = False
     reconnect_interval_sec: float = 5.0
     action_timeout_sec: float = 15.0
 
@@ -134,5 +138,12 @@ def load_config(path: str | Path | None = None) -> CollectorConfig:
         cfg.storage.db_path = env_db
     if env_log := os.getenv("LOG_LEVEL"):
         cfg.log_level = env_log.upper()
+
+    _placeholder_secrets = {"", "dev-collector-secret", "replace-with-strong-hmac-secret"}
+    _placeholder_salts = {"", "collector-submitter-salt", "replace-with-random-salt"}
+    if cfg.hub.shared_secret.strip() in _placeholder_secrets or len(cfg.hub.shared_secret.strip()) < 16:
+        logger.warning("Collector is using placeholder or weak shared_secret; configure COLLECTOR_SHARED_SECRET (>=16 chars) for production!")
+    if cfg.hub.submitter_salt.strip() in _placeholder_salts or len(cfg.hub.submitter_salt.strip()) < 16:
+        logger.warning("Collector is using placeholder or weak submitter_salt; configure COLLECTOR_SUBMITTER_SALT (>=16 chars) for production!")
 
     return cfg

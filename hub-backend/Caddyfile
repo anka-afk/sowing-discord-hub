@@ -1,4 +1,14 @@
 {$API_DOMAIN:banshi-api.ankaanka.org} {
     encode zstd gzip
+    request_body {
+        max_size 12MB
+    }
+    header {
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "no-referrer"
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        -Server
+    }
     reverse_proxy hub-api:8000
 }

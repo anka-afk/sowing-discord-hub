@@ -53,6 +53,7 @@ import ChatPreviewCard from '@/components/ChatPreviewCard.vue';
 import AdminLoginCard from '@/components/admin/AdminLoginCard.vue';
 import AdminStatsBar from '@/components/admin/AdminStatsBar.vue';
 import AdminKillSwitchPanel from '@/components/admin/AdminKillSwitchPanel.vue';
+import AdminChatEditNodes from '@/components/admin/AdminChatEditNodes.vue';
 
 type AdminMode = 'pending' | 'pending_recheck' | 'killswitch';
 
@@ -64,6 +65,7 @@ const REJECT_REASONS = [
 
 const { isAuthenticated, user, setSession, clearSession } = useAuth();
 const toast = useToast();
+const isSuperAdmin = computed(() => user.value?.role === 'super_admin');
 
 const activeMode = ref<AdminMode>('pending');
 const stats = ref<AdminStatsResponse | null>(null);
@@ -87,6 +89,8 @@ const editNsfw = ref<NsfwLevel>(0);
 const editTags = ref<string[]>([]);
 const customTag = ref('');
 const editedChatMessages = ref<ChatMessageNode[] | null>(null);
+const editedTextBlocks = ref<Record<string, string>>({});
+const showTextEditor = ref(false);
 const showChatEditor = ref(false);
 
 // Interactive overlays for keyboard & mobile flow
@@ -118,7 +122,21 @@ const activeChatMessages = computed<ChatMessageNode[]>(() => {
 
 const nonChatBlocks = computed(() => {
   if (!currentItem.value) return [];
-  return currentItem.value.blocks.filter((b) => b.type !== 'chat_record');
+  return currentItem.value.blocks
+    .map((b, idx) => {
+      if (b.type === 'text' && editedTextBlocks.value[String(idx)] !== undefined) {
+        return { ...b, text: editedTextBlocks.value[String(idx)] };
+      }
+      return b;
+    })
+    .filter((b) => b.type !== 'chat_record');
+});
+
+const editableTextBlockEntries = computed(() => {
+  if (!currentItem.value) return [];
+  return currentItem.value.blocks
+    .map((b, idx) => ({ idx: String(idx), block: b }))
+    .filter((entry) => entry.block.type === 'text');
 });
 
 const fullTagCatalog = computed(() =>
@@ -157,18 +175,22 @@ const mergedPrivacyWarnings = computed(() => {
     }
   }
 
-  // Also scan current editable text in real time (recursively across nested chat)
+  // Also scan current editable text in real time (recursively across nested chat & edited text blocks)
   const texts = [editTitle.value, editSummary.value];
-  for (const b of item.blocks) {
-    if (b.type === 'text') texts.push(b.text);
-  }
+  if (item.attribution?.submitter_name) texts.push(item.attribution.submitter_name);
+  item.blocks.forEach((b, idx) => {
+    if (b.type === 'text') {
+      texts.push(editedTextBlocks.value[String(idx)] ?? b.text);
+    }
+  });
   const collectChatTexts = (nodes: ChatMessageNode[]) => {
     for (const m of nodes) {
       texts.push(m.sender_alias);
       for (const p of m.content) {
         if (p.type === 'text') texts.push(p.text);
-        else if (p.type === 'forward_quote' && p.messages) {
-          collectChatTexts(p.messages);
+        else if (p.type === 'forward_quote') {
+          if (p.title) texts.push(p.title);
+          if (p.messages) collectChatTexts(p.messages);
         }
       }
     }
@@ -203,6 +225,7 @@ function syncEditorsFromCurrent() {
   renderedSlices.value = [];
   showRejectModal.value = false;
   showChatEditor.value = false;
+  showTextEditor.value = false;
   customTag.value = '';
 
   const item = currentItem.value;
@@ -212,6 +235,7 @@ function syncEditorsFromCurrent() {
     editNsfw.value = 0;
     editTags.value = [];
     editedChatMessages.value = null;
+    editedTextBlocks.value = {};
     return;
   }
 
@@ -219,6 +243,13 @@ function syncEditorsFromCurrent() {
   editSummary.value = item.summary || '';
   editNsfw.value = (item.nsfw_level ?? 0) as NsfwLevel;
   editTags.value = [...(item.tags ?? [])];
+  const nextTextEdits: Record<string, string> = {};
+  item.blocks.forEach((b, idx) => {
+    if (b.type === 'text') {
+      nextTextEdits[String(idx)] = b.text;
+    }
+  });
+  editedTextBlocks.value = nextTextEdits;
   const cb = item.blocks.find((b): b is ChatRecordBlock => b.type === 'chat_record');
   editedChatMessages.value = cb
     ? JSON.parse(JSON.stringify(cb.messages || []))
@@ -309,11 +340,15 @@ async function fetchQueue() {
 
 function handleUnauthorized() {
   clearSession();
+  activeMode.value = 'pending';
   toast.warning('管理员登录已过期，请重新登录');
 }
 
 function onLoggedIn(session: AdminLoginResponse) {
   setSession(session);
+  if (!isSuperAdmin.value && activeMode.value === 'killswitch') {
+    activeMode.value = 'pending';
+  }
   fetchMetaTags();
   fetchStats();
   fetchQueue();
@@ -321,6 +356,7 @@ function onLoggedIn(session: AdminLoginResponse) {
 
 function logout() {
   clearSession();
+  activeMode.value = 'pending';
   queue.value = [];
   stats.value = null;
   toast.info('已退出管理员登录');
@@ -458,6 +494,39 @@ function removeCurrentAndAdvance() {
   fetchStats();
 }
 
+function validateChatMessages(messages: ChatMessageNode[], depth = 0): string | null {
+  if (!Array.isArray(messages) || messages.length === 0) {
+    return '聊天记录不能为空';
+  }
+  if (depth > 5) {
+    return '嵌套聊天记录层级过深';
+  }
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+    const parts = Array.isArray(msg.content) ? msg.content : [];
+    let hasValidPart = false;
+    for (const part of parts) {
+      if (part.type === 'text') {
+        if (part.text && part.text.trim()) {
+          hasValidPart = true;
+        }
+      } else if (part.type === 'image' || part.type === 'gif') {
+        if (part.media_id || part.url) {
+          hasValidPart = true;
+        }
+      } else if (part.type === 'forward_quote') {
+        const nestedErr = validateChatMessages(part.messages, depth + 1);
+        if (nestedErr) return nestedErr;
+        hasValidPart = true;
+      }
+    }
+    if (!hasValidPart) {
+      return `第 ${i + 1} 条聊天消息内容不能为空，如需遮挡请替换为 [已脱敏]`;
+    }
+  }
+  return null;
+}
+
 async function approveCurrent() {
   const item = currentItem.value;
   if (!item || actionBusy.value) return;
@@ -465,6 +534,36 @@ async function approveCurrent() {
   // Auto-commit any pending text typed into the custom tag input before approving
   if (customTag.value.trim()) {
     addCustomTag();
+  }
+
+  // Validate edited text blocks & chat messages BEFORE uploading any chat slices
+  const changedTextBlocks: Record<string, string> = {};
+  for (let idx = 0; idx < item.blocks.length; idx++) {
+    const b = item.blocks[idx];
+    if (b.type === 'text') {
+      const key = String(idx);
+      const editedVal = editedTextBlocks.value[key];
+      if (editedVal !== undefined) {
+        const trimmed = editedVal.trim();
+        if (!trimmed) {
+          showTextEditor.value = true;
+          toast.warning(`正文块 #${idx + 1} 不能为空，如需遮挡请替换为 [已脱敏]`);
+          return;
+        }
+        if (trimmed !== b.text.trim()) {
+          changedTextBlocks[key] = trimmed;
+        }
+      }
+    }
+  }
+
+  if (chatBlock.value) {
+    const chatErr = validateChatMessages(activeChatMessages.value);
+    if (chatErr) {
+      showChatEditor.value = true;
+      toast.warning(chatErr);
+      return;
+    }
   }
 
   actionBusy.value = true;
@@ -505,6 +604,7 @@ async function approveCurrent() {
       nsfw_level: editNsfw.value,
       rendered_images: uploadedSlicesMeta,
       edited_chat_messages: chatBlock.value ? activeChatMessages.value : undefined,
+      edited_text_blocks: Object.keys(changedTextBlocks).length > 0 ? changedTextBlocks : undefined,
     });
 
     if (finalTags.length > 0) {
@@ -634,10 +734,32 @@ function handleKeydown(e: KeyboardEvent) {
 }
 
 watch(activeMode, (next) => {
+  if (next === 'killswitch' && !isSuperAdmin.value) {
+    activeMode.value = 'pending';
+    return;
+  }
   if (next !== 'killswitch' && isAuthenticated.value) {
     fetchQueue();
   }
 });
+
+watch(isSuperAdmin, (superAdmin) => {
+  if (!superAdmin && activeMode.value === 'killswitch') {
+    activeMode.value = 'pending';
+  }
+});
+
+// Invalidate cached preview slices immediately whenever chat nodes or title are redacted/edited
+watch(
+  [editedChatMessages, editTitle],
+  () => {
+    if (renderedSlices.value.length > 0) {
+      revokeRenderedSlices(renderedSlices.value);
+      renderedSlices.value = [];
+    }
+  },
+  { deep: true },
+);
 
 onMounted(() => {
   window.addEventListener('keydown', handleKeydown);
@@ -687,6 +809,7 @@ onBeforeUnmount(() => {
             复核 ({{ stats?.pending_recheck_count ?? 0 }})
           </button>
           <button
+            v-if="isSuperAdmin"
             type="button"
             class="btn btn-sm"
             :class="{ 'btn-danger': activeMode === 'killswitch' }"
@@ -710,9 +833,9 @@ onBeforeUnmount(() => {
     <!-- Stats Bar -->
     <AdminStatsBar :stats="stats" />
 
-    <!-- Mode: Kill Switch -->
+    <!-- Mode: Kill Switch (super_admin only) -->
     <AdminKillSwitchPanel
-      v-if="activeMode === 'killswitch'"
+      v-if="activeMode === 'killswitch' && isSuperAdmin"
       @takedown-done="fetchStats()"
     />
 
@@ -800,6 +923,7 @@ onBeforeUnmount(() => {
                     v-if="sim.status === 'approved'"
                     :to="`/m/${sim.item_id}`"
                     target="_blank"
+                    rel="noopener noreferrer"
                     class="inline-link"
                   >
                     对比原条 <ExternalLink :size="11" />
@@ -834,6 +958,32 @@ onBeforeUnmount(() => {
                 <span v-if="currentItem.reports" class="badge badge-danger">
                   被举报 {{ currentItem.reports }} 次
                 </span>
+              </div>
+            </div>
+
+            <div v-if="editableTextBlockEntries.length > 0" class="text-redact-bar">
+              <button
+                type="button"
+                class="btn btn-sm"
+                @click="showTextEditor = !showTextEditor"
+              >
+                <Edit3 :size="13" />
+                {{ showTextEditor ? '完成正文脱敏' : '脱敏编辑正文文本' }}
+              </button>
+              <div v-if="showTextEditor" class="inline-chat-editor">
+                <label
+                  v-for="entry in editableTextBlockEntries"
+                  :key="entry.idx"
+                  class="field"
+                >
+                  <span class="field-label">正文块 #{{ Number(entry.idx) + 1 }}</span>
+                  <textarea
+                    v-model="editedTextBlocks[entry.idx]"
+                    class="textarea"
+                    rows="3"
+                    placeholder="编辑正文内容（隐私脱敏）"
+                  />
+                </label>
               </div>
             </div>
 
@@ -872,24 +1022,9 @@ onBeforeUnmount(() => {
                 </div>
               </div>
 
-              <!-- Optional Inline Anonymization Editor -->
+              <!-- Optional Inline Anonymization Editor (supports nested forward_quote recursively) -->
               <div v-if="showChatEditor && editedChatMessages" class="inline-chat-editor">
-                <div v-for="(msg, mIdx) in editedChatMessages" :key="mIdx" class="inline-msg-row">
-                  <input
-                    v-model="msg.sender_alias"
-                    type="text"
-                    class="input alias-sm"
-                    placeholder="群友A"
-                  />
-                  <template v-for="(part, pIdx) in msg.content" :key="pIdx">
-                    <input
-                      v-if="part.type === 'text'"
-                      v-model="part.text"
-                      type="text"
-                      class="input text-sm"
-                    />
-                  </template>
-                </div>
+                <AdminChatEditNodes :messages="editedChatMessages" />
               </div>
 
               <!-- Live DOM Preview -->

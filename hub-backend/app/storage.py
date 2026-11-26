@@ -27,6 +27,16 @@ class StorageBackend(ABC):
         ...
 
     @abstractmethod
+    def copy_to_public(
+        self,
+        private_key: str,
+        public_key: str,
+        content_type: str,
+    ) -> str:
+        """Copy private object to public namespace WITHOUT deleting private_key yet (two-phase safe)."""
+        ...
+
+    @abstractmethod
     def move_to_public(
         self,
         private_key: str,
@@ -48,7 +58,7 @@ class StorageBackend(ABC):
 
 
 class LocalStorageBackend(StorageBackend):
-    """Local filesystem storage backend for development and testing."""
+    """Local filesystem storage backend for development, testing, and single-node ECS."""
 
     def __init__(self, base_dir: str, public_media_base_url: str) -> None:
         self.base_dir = Path(base_dir).resolve()
@@ -58,9 +68,11 @@ class LocalStorageBackend(StorageBackend):
         self.public_media_base_url = public_media_base_url.rstrip("/")
 
     def _safe_path(self, key: str) -> Path:
+        if "\x00" in key:
+            raise ValueError(f"Invalid storage key null byte: {key!r}")
         normalized = key.lstrip("/").replace("\\", "/")
         target = (self.base_dir / normalized).resolve()
-        if not str(target).startswith(str(self.base_dir)):
+        if not target.is_relative_to(self.base_dir):
             raise ValueError(f"Invalid storage key path traversal: {key}")
         return target
 
@@ -81,7 +93,7 @@ class LocalStorageBackend(StorageBackend):
             return None
         return path.read_bytes()
 
-    def move_to_public(
+    def copy_to_public(
         self,
         private_key: str,
         public_key: str,
@@ -91,15 +103,22 @@ class LocalStorageBackend(StorageBackend):
         dst = self._safe_path(public_key)
         dst.parent.mkdir(parents=True, exist_ok=True)
         if src.is_file():
-            dst.write_bytes(src.read_bytes())
             if src != dst:
-                try:
-                    src.unlink()
-                except OSError:
-                    pass
+                dst.write_bytes(src.read_bytes())
         elif not dst.is_file():
             raise FileNotFoundError(f"Source media object not found: {private_key}")
         return self.public_url(public_key)
+
+    def move_to_public(
+        self,
+        private_key: str,
+        public_key: str,
+        content_type: str,
+    ) -> str:
+        url = self.copy_to_public(private_key, public_key, content_type)
+        if private_key.lstrip("/") != public_key.lstrip("/"):
+            self.delete(private_key)
+        return url
 
     def delete(self, key: str) -> None:
         path = self._safe_path(key)
@@ -117,13 +136,14 @@ class LocalStorageBackend(StorageBackend):
 
 
 class R2StorageBackend(StorageBackend):
-    """Cloudflare R2 S3-compatible object storage with optional CF CDN Purge."""
+    """Cloudflare R2 S3-compatible object storage with split private/public buckets & optional CF Purge."""
 
     def __init__(self, settings: Settings) -> None:
         import boto3
         from botocore.config import Config
 
-        self.bucket = settings.r2_bucket_name
+        self.private_bucket = settings.effective_r2_private_bucket
+        self.public_bucket = settings.effective_r2_public_bucket
         self.public_media_base_url = settings.public_media_base_url.rstrip("/")
         self.cf_zone_id = settings.cf_zone_id
         self.cf_api_token = settings.cf_api_token
@@ -135,6 +155,19 @@ class R2StorageBackend(StorageBackend):
             region_name=settings.r2_region,
             config=Config(signature_version="s3v4"),
         )
+
+    def _bucket_for_key(self, key: str) -> str:
+        clean = key.lstrip("/")
+        if clean.startswith("public/"):
+            return self.public_bucket
+        return self.private_bucket
+
+    def _object_key(self, key: str) -> str:
+        clean = key.lstrip("/")
+        # When using a dedicated public bucket, strip leading public/ prefix so CDN maps cleanly
+        if self.public_bucket != self.private_bucket and clean.startswith("public/"):
+            return clean[len("public/") :]
+        return clean
 
     def put_bytes(
         self,
@@ -149,18 +182,42 @@ class R2StorageBackend(StorageBackend):
         else:
             extra["CacheControl"] = "private, no-store"
         self.client.put_object(
-            Bucket=self.bucket,
-            Key=key.lstrip("/"),
+            Bucket=self._bucket_for_key(key),
+            Key=self._object_key(key),
             Body=data,
             **extra,
         )
 
     def get_bytes(self, key: str) -> bytes | None:
         try:
-            resp = self.client.get_object(Bucket=self.bucket, Key=key.lstrip("/"))
+            resp = self.client.get_object(
+                Bucket=self._bucket_for_key(key),
+                Key=self._object_key(key),
+            )
             return resp["Body"].read()
         except Exception:
             return None
+
+    def copy_to_public(
+        self,
+        private_key: str,
+        public_key: str,
+        content_type: str,
+    ) -> str:
+        src_bucket = self._bucket_for_key(private_key)
+        src_key = self._object_key(private_key)
+        dst_bucket = self._bucket_for_key(public_key)
+        dst_key = self._object_key(public_key)
+        if src_bucket != dst_bucket or src_key != dst_key:
+            self.client.copy_object(
+                Bucket=dst_bucket,
+                CopySource={"Bucket": src_bucket, "Key": src_key},
+                Key=dst_key,
+                ContentType=content_type,
+                CacheControl="public, max-age=31536000, immutable",
+                MetadataDirective="REPLACE",
+            )
+        return self.public_url(public_key)
 
     def move_to_public(
         self,
@@ -168,23 +225,20 @@ class R2StorageBackend(StorageBackend):
         public_key: str,
         content_type: str,
     ) -> str:
-        src_key = private_key.lstrip("/")
-        dst_key = public_key.lstrip("/")
-        if src_key != dst_key:
-            self.client.copy_object(
-                Bucket=self.bucket,
-                CopySource={"Bucket": self.bucket, "Key": src_key},
-                Key=dst_key,
-                ContentType=content_type,
-                CacheControl="public, max-age=31536000, immutable",
-                MetadataDirective="REPLACE",
-            )
-            self.delete(src_key)
-        return self.public_url(dst_key)
+        url = self.copy_to_public(private_key, public_key, content_type)
+        if (
+            self._bucket_for_key(private_key) != self._bucket_for_key(public_key)
+            or self._object_key(private_key) != self._object_key(public_key)
+        ):
+            self.delete(private_key)
+        return url
 
     def delete(self, key: str) -> None:
         try:
-            self.client.delete_object(Bucket=self.bucket, Key=key.lstrip("/"))
+            self.client.delete_object(
+                Bucket=self._bucket_for_key(key),
+                Key=self._object_key(key),
+            )
         except Exception as exc:
             logger.warning("Failed to delete R2 key %s: %s", key, exc)
 

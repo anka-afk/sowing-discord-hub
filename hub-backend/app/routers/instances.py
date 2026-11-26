@@ -3,11 +3,12 @@ from __future__ import annotations
 import secrets
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from app.config import Settings
 from app.db import Database, utc_now_iso
 from app.deps import get_db, get_settings
+from app.ratelimit import enforce_rate_limit, get_client_ip
 from app.schemas import (
     ChallengeResponse,
     InstanceRegisterRequest,
@@ -27,15 +28,31 @@ router = APIRouter(prefix="/api/v1/instances", tags=["instances"])
 
 @router.get("/challenge", response_model=ChallengeResponse)
 def get_challenge(
+    request: Request,
     settings: Settings = Depends(get_settings),
     db: Database = Depends(get_db),
 ) -> ChallengeResponse:
+    client_ip = get_client_ip(request)
+    enforce_rate_limit(
+        request,
+        settings,
+        scope="instances_challenge",
+        identity=f"ip:{client_ip}",
+        limit=30,
+        window_seconds=60,
+    )
+
     challenge_id = generate_prefixed_id("chl")
     nonce_prefix = secrets.token_hex(8)
     expires_at = iso_after_seconds(settings.pow_ttl_seconds)
     now = utc_now_iso()
 
     with db.write() as conn:
+        # Prune expired/consumed challenges to prevent unbounded table growth
+        conn.execute(
+            "DELETE FROM pow_challenges WHERE used = 1 OR expires_at < ?",
+            (now,),
+        )
         conn.execute(
             """
             INSERT INTO pow_challenges (challenge_id, nonce_prefix, difficulty_bits, expires_at, used, created_at)
@@ -54,9 +71,21 @@ def get_challenge(
 
 @router.post("/register", response_model=InstanceRegisterResponse)
 def register_instance(
+    request: Request,
     body: InstanceRegisterRequest,
+    settings: Settings = Depends(get_settings),
     db: Database = Depends(get_db),
 ) -> InstanceRegisterResponse:
+    client_ip = get_client_ip(request)
+    enforce_rate_limit(
+        request,
+        settings,
+        scope="instances_register",
+        identity=f"ip:{client_ip}",
+        limit=15,
+        window_seconds=300,
+    )
+
     now = utc_now_iso()
     now_dt = datetime.now(timezone.utc)
 

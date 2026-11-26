@@ -42,76 +42,115 @@ def detect_magic_mime(data: bytes) -> str | None:
     return None
 
 
-def _strip_gif_comments(raw: bytes) -> bytes:
-    """Strip GIF Comment Extension blocks (0x21 0xFE) safely without re-encoding frames.
+_ALLOWED_GIF_APP_IDS = (b"NETSCAPE2.0", b"ANIMEXTS1.0")
 
-    If parsing hits an unexpected byte structure, fall back to original raw bytes so
-    valid animated GIFs are never corrupted.
+
+def _sanitize_gif_and_count_frames(
+    raw: bytes,
+    max_frames: int | None = None,
+) -> tuple[bytes, int, int, int]:
+    """Parse GIF in O(file_size) bytes without LZW pixel decompression.
+
+    - Extracts Logical Screen (width, height) and counts 0x2C Image Descriptor frames.
+    - Aborts early if frame count exceeds `max_frames`.
+    - Allowlists ONLY Graphic Control Extension (0xF9) and looping Application Extensions
+      (NETSCAPE2.0 / ANIMEXTS1.0), stripping Comments (0xFE), Plain Text (0x01), and XMP/ICC.
+    - Rejects malformed structures and non-zero trailing polyglot bytes fail-closed.
     """
-    try:
-        n = len(raw)
-        if n < 13 or raw[:6] not in (b"GIF87a", b"GIF89a"):
-            return raw
-        out = bytearray()
-        # Header (6) + Logical Screen Descriptor (7)
-        packed = raw[10]
-        pos = 13
-        if packed & 0x80:
-            gct_size = 3 * (1 << ((packed & 0x07) + 1))
-            pos += gct_size
-        if pos > n:
-            return raw
-        out.extend(raw[:pos])
+    n = len(raw)
+    if n < 13 or raw[:6] not in (b"GIF87a", b"GIF89a"):
+        raise MediaValidationError("Invalid GIF header")
 
-        while pos < n:
-            introducer = raw[pos]
-            if introducer == 0x3B:  # Trailer
-                out.append(0x3B)
+    lsd_w = int.from_bytes(raw[6:8], "little")
+    lsd_h = int.from_bytes(raw[8:10], "little")
+    out = bytearray()
+    packed = raw[10]
+    pos = 13
+    if packed & 0x80:
+        gct_size = 3 * (1 << ((packed & 0x07) + 1))
+        pos += gct_size
+    if pos > n:
+        raise MediaValidationError("Truncated GIF global color table")
+    out.extend(raw[:pos])
+
+    frame_count = 0
+    saw_trailer = False
+    while pos < n:
+        introducer = raw[pos]
+        if introducer == 0x3B:  # Trailer
+            out.append(0x3B)
+            pos += 1
+            saw_trailer = True
+            break
+        elif introducer == 0x21:  # Extension block
+            if pos + 2 > n:
+                raise MediaValidationError("Truncated GIF extension header")
+            label = raw[pos + 1]
+            start = pos
+            pos += 2
+            while pos < n:
+                sub_len = raw[pos]
                 pos += 1
-                break
-            elif introducer == 0x21:  # Extension block
-                if pos + 2 > n:
-                    return raw
-                label = raw[pos + 1]
-                start = pos
-                pos += 2
-                # Skip sub-blocks
-                while pos < n:
-                    sub_len = raw[pos]
-                    pos += 1
-                    if sub_len == 0:
-                        break
-                    pos += sub_len
-                if pos > n:
-                    return raw
-                if label != 0xFE:  # Keep everything except Comment Extension
-                    out.extend(raw[start:pos])
-            elif introducer == 0x2C:  # Image Descriptor
-                start = pos
-                if pos + 10 > n:
-                    return raw
-                img_packed = raw[pos + 9]
-                pos += 10
-                if img_packed & 0x80:
-                    lct_size = 3 * (1 << ((img_packed & 0x07) + 1))
-                    pos += lct_size
-                if pos >= n:
-                    return raw
-                pos += 1  # LZW minimum code size
-                while pos < n:
-                    sub_len = raw[pos]
-                    pos += 1
-                    if sub_len == 0:
-                        break
-                    pos += sub_len
-                if pos > n:
-                    return raw
+                if sub_len == 0:
+                    break
+                pos += sub_len
+            if pos > n:
+                raise MediaValidationError("Truncated GIF extension sub-block")
+            keep = False
+            if label == 0xF9:
+                keep = True
+            elif label == 0xFF:
+                if (
+                    pos - start >= 14
+                    and raw[start + 2] == 0x0B
+                    and raw[start + 3 : start + 14] in _ALLOWED_GIF_APP_IDS
+                ):
+                    keep = True
+            if keep:
                 out.extend(raw[start:pos])
-            else:
-                return raw
-        return bytes(out)
-    except Exception:
-        return raw
+        elif introducer == 0x2C:  # Image Descriptor (one frame)
+            frame_count += 1
+            if max_frames is not None and frame_count > max_frames:
+                raise MediaValidationError(
+                    f"GIF exceeds maximum frame count ({max_frames})"
+                )
+            start = pos
+            if pos + 10 > n:
+                raise MediaValidationError("Truncated GIF image descriptor")
+            img_packed = raw[pos + 9]
+            pos += 10
+            if img_packed & 0x80:
+                lct_size = 3 * (1 << ((img_packed & 0x07) + 1))
+                pos += lct_size
+            if pos >= n:
+                raise MediaValidationError("Truncated GIF local color table")
+            pos += 1  # LZW minimum code size
+            while pos < n:
+                sub_len = raw[pos]
+                pos += 1
+                if sub_len == 0:
+                    break
+                pos += sub_len
+            if pos > n:
+                raise MediaValidationError("Truncated GIF image data sub-block")
+            out.extend(raw[start:pos])
+        elif introducer == 0x00:
+            pos += 1
+        else:
+            raise MediaValidationError(f"Malformed GIF block introducer: 0x{introducer:02x}")
+
+    if not saw_trailer:
+        raise MediaValidationError("Malformed GIF missing trailer")
+    if raw[pos:].rstrip(b"\x00"):
+        raise MediaValidationError("Trailing data after GIF trailer")
+    if frame_count <= 0:
+        raise MediaValidationError("GIF contains no image frames")
+    return bytes(out), frame_count, lsd_w, lsd_h
+
+
+def _strip_gif_comments(raw: bytes) -> bytes:
+    cleaned, _, _, _ = _sanitize_gif_and_count_frames(raw)
+    return cleaned
 
 
 def process_uploaded_media(
@@ -147,18 +186,24 @@ def process_uploaded_media(
             raise MediaValidationError(
                 f"GIF exceeds maximum size of {settings.max_gif_bytes} bytes"
             )
+        # Parse structure, strip metadata extensions, and count frames BEFORE Pillow decodes pixels
+        cleaned_gif, n_frames, lsd_w, lsd_h = _sanitize_gif_and_count_frames(
+            raw_bytes, max_frames=settings.max_gif_frames
+        )
+        if lsd_w <= 0 or lsd_h <= 0:
+            raise MediaValidationError("Invalid GIF dimensions")
+        if lsd_w * lsd_h > settings.max_image_pixels:
+            raise MediaValidationError("GIF exceeds maximum pixel limit")
+        if lsd_w * lsd_h * min(n_frames, 100) > settings.max_image_pixels * 15:
+            raise MediaValidationError("GIF triggers decompression bomb guard")
+
         try:
-            with Image.open(io.BytesIO(raw_bytes)) as img:
+            with Image.open(io.BytesIO(cleaned_gif)) as img:
                 width, height = img.size
                 if width <= 0 or height <= 0:
                     raise MediaValidationError("Invalid GIF dimensions")
                 if width * height > settings.max_image_pixels:
                     raise MediaValidationError("GIF exceeds maximum pixel limit")
-                n_frames = getattr(img, "n_frames", 1)
-                if n_frames > settings.max_gif_frames:
-                    raise MediaValidationError(
-                        f"GIF exceeds maximum frame count ({settings.max_gif_frames})"
-                    )
                 if width * height * min(n_frames, 100) > settings.max_image_pixels * 15:
                     raise MediaValidationError("GIF triggers decompression bomb guard")
                 img.seek(0)
@@ -169,7 +214,6 @@ def process_uploaded_media(
         except Exception as exc:
             raise MediaValidationError(f"Invalid or corrupted GIF: {exc}") from exc
 
-        cleaned_gif = _strip_gif_comments(raw_bytes)
         sha_hex = hashlib.sha256(cleaned_gif).hexdigest()
         return ProcessedMedia(
             data=cleaned_gif,

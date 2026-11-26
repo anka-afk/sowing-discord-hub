@@ -27,13 +27,27 @@ async def _require_collector_hmac(
 ) -> None:
     ts = request.headers.get("x-collector-timestamp")
     sig = request.headers.get("x-collector-signature")
+    if not ts or not sig:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired collector HMAC signature",
+        )
+    nonce = request.headers.get("x-collector-nonce")
     raw_body = (
         request.scope["collector_raw_body"]
         if "collector_raw_body" in request.scope
         else await request.body()
     )
+    replay_cache = getattr(request.app.state, "collector_replay_cache", None)
     if not verify_collector_hmac(
-        ts, sig, request.method, request.url.path, raw_body, settings
+        ts,
+        sig,
+        request.method,
+        request.url.path,
+        raw_body,
+        settings,
+        nonce=nonce,
+        replay_cache=replay_cache,
     ):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -54,6 +68,7 @@ async def collector_upload_media(
         settings=settings,
         db=db,
         storage=storage,
+        uploader_hash=salted_hmac("collector", settings, namespace="submitter"),
     )
 
 
@@ -86,10 +101,13 @@ async def collector_ingest(
     )
 
     with db.write() as conn:
+        # Compute normalized blocks & content_hash first so idempotent collector retries
+        # carrying an already-attached media_id still return duplicate=True cleanly.
         norm_blocks, media_ids, content_type, content_hash = validate_and_normalize_blocks(
             body.blocks,
             conn,
             settings,
+            require_unattached=False,
         )
 
         # Deduplicate identical collector ingests already approved or pending
@@ -108,6 +126,18 @@ async def collector_ingest(
                 status="pending",
                 duplicate=True,
             )
+
+        # For genuinely new items, strictly require every referenced media_id is unattached
+        for mid in media_ids:
+            mrow = conn.execute(
+                "SELECT item_id FROM media_assets WHERE id = ?",
+                (mid,),
+            ).fetchone()
+            if mrow is None or mrow["item_id"] is not None:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"Media asset {mid} is already attached to another item",
+                )
 
         submission_id = generate_ulid()
         payload_json = json.dumps(

@@ -2,15 +2,16 @@ from __future__ import annotations
 
 import json
 import math
+import posixpath
 import re
 import sqlite3
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from fastapi import HTTPException, status
 
 from app.config import Settings
-from app.security import is_allowed_video_link, sha256_hex
+from app.security import is_allowed_video_link, sha256_hex, sign_admin_media_url
 
 
 def compute_wilson_score(likes: int, dislikes: int, z: float = 1.96) -> float:
@@ -48,10 +49,57 @@ def _infer_video_platform(url: str) -> str:
     return host or "other"
 
 
-def _fetch_media_row(conn: sqlite3.Connection, media_id: str) -> sqlite3.Row:
+_TRUSTED_MEDIA_SUFFIX_RE = re.compile(r"^[A-Za-z0-9/._-]+\.(?:webp|gif)$", re.IGNORECASE)
+
+
+def _is_trusted_public_media_url(raw_url: str, public_media_base_url: str) -> bool:
+    """Strictly verify URL matches (scheme, netloc) and normalized safe path under public_media_base_url."""
+    if not raw_url or "\\" in raw_url or "\x00" in raw_url:
+        return False
+    try:
+        parsed = urlparse(raw_url)
+        base = urlparse(public_media_base_url.rstrip("/"))
+    except Exception:
+        return False
+    if parsed.scheme not in ("http", "https") or parsed.scheme != base.scheme:
+        return False
+    if parsed.username is not None or parsed.password is not None or "@" in parsed.netloc:
+        return False
+    if not parsed.netloc or parsed.netloc.lower() != base.netloc.lower():
+        return False
+    if parsed.params or parsed.query or parsed.fragment:
+        return False
+    lower_path = parsed.path.lower()
+    if "%2e" in lower_path or "%2f" in lower_path or "%5c" in lower_path or "%00" in lower_path:
+        return False
+    decoded_path = unquote(parsed.path)
+    if "\\" in decoded_path or "\x00" in decoded_path:
+        return False
+    segments = decoded_path.split("/")
+    if any(seg in (".", "..") for seg in segments):
+        return False
+    norm_path = posixpath.normpath(decoded_path)
+    base_path = base.path.rstrip("/")
+    prefix = f"{base_path}/" if base_path else "/"
+    if not norm_path.startswith(prefix):
+        return False
+    rel = norm_path[len(prefix) :]
+    if not rel or not _TRUSTED_MEDIA_SUFFIX_RE.fullmatch(rel):
+        return False
+    return True
+
+
+def _fetch_media_row(
+    conn: sqlite3.Connection,
+    media_id: str,
+    *,
+    require_unattached: bool = False,
+    uploader_hash: str | None = None,
+) -> sqlite3.Row:
     row = conn.execute(
         """
-        SELECT id, item_id, sha256, phash, mime_type, r2_key, url, w, h, size_bytes, visibility, is_deleted
+        SELECT id, item_id, sha256, phash, mime_type, r2_key, url, w, h, size_bytes,
+               visibility, uploader_hash, is_deleted
         FROM media_assets
         WHERE id = ?
         """,
@@ -62,6 +110,16 @@ def _fetch_media_row(conn: sqlite3.Connection, media_id: str) -> sqlite3.Row:
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Referenced media_id not found or deleted: {media_id}",
         )
+    if require_unattached and row["item_id"] is not None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Media asset {media_id} is already attached to another item",
+        )
+    if uploader_hash is not None and row["uploader_hash"] != uploader_hash:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Media asset {media_id} does not belong to this submitter",
+        )
     return row
 
 
@@ -69,6 +127,9 @@ def validate_and_normalize_blocks(
     raw_blocks: list[dict[str, Any]],
     conn: sqlite3.Connection,
     settings: Settings,
+    *,
+    require_unattached: bool = True,
+    uploader_hash: str | None = None,
 ) -> tuple[list[dict[str, Any]], list[str], str, str]:
     """Validate submission blocks against Schema v1.0 & security rules.
 
@@ -84,6 +145,7 @@ def validate_and_normalize_blocks(
     media_ids: list[str] = []
     hash_parts: list[str] = []
     image_count = 0
+    chat_node_counter = [0]
     block_types: list[str] = []
 
     for idx, blk in enumerate(raw_blocks):
@@ -133,7 +195,12 @@ def validate_and_normalize_blocks(
                     status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                     detail=f"Too many images: maximum {settings.max_images_per_submission} per submission",
                 )
-            mrow = _fetch_media_row(conn, media_id)
+            mrow = _fetch_media_row(
+                conn,
+                media_id,
+                require_unattached=require_unattached,
+                uploader_hash=uploader_hash,
+            )
             mime = mrow["mime_type"]
             if btype == "gif" and mime != "image/gif":
                 raise HTTPException(
@@ -163,17 +230,18 @@ def validate_and_normalize_blocks(
                     status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                     detail=f"Block #{idx} chat_record requires non-empty messages list",
                 )
-            node_counter = [0]
             img_counter = [image_count]
             norm_msgs = _normalize_chat_messages(
                 raw_msgs,
                 conn,
                 settings,
                 depth=0,
-                node_counter=node_counter,
+                node_counter=chat_node_counter,
                 img_counter=img_counter,
                 media_ids=media_ids,
                 hash_parts=hash_parts,
+                require_unattached=require_unattached,
+                uploader_hash=uploader_hash,
             )
             image_count = img_counter[0]
             normalized.append(
@@ -204,13 +272,24 @@ def validate_and_normalize_blocks(
             cover_media_id = blk.get("cover_media_id")
             cover_url = ""
             if cover_media_id:
-                mrow = _fetch_media_row(conn, str(cover_media_id))
+                image_count += 1
+                if image_count > settings.max_images_per_submission:
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail=f"Too many images: maximum {settings.max_images_per_submission} per submission",
+                    )
+                mrow = _fetch_media_row(
+                    conn,
+                    str(cover_media_id),
+                    require_unattached=require_unattached,
+                    uploader_hash=uploader_hash,
+                )
                 media_ids.append(str(cover_media_id))
                 cover_url = mrow["url"] or f"/api/v1/admin/media/{cover_media_id}"
             elif blk.get("cover_url"):
-                # Only allow cover_url already hosted by our public media base (no SSRF/hotlinking)
+                # Strictly match exact (scheme, netloc) and path boundary of public_media_base_url
                 raw_cover = str(blk.get("cover_url")).strip()
-                if raw_cover.startswith(settings.public_media_base_url.rstrip("/")):
+                if _is_trusted_public_media_url(raw_cover, settings.public_media_base_url):
                     cover_url = raw_cover
                 else:
                     raise HTTPException(
@@ -262,6 +341,8 @@ def _normalize_chat_messages(
     img_counter: list[int],
     media_ids: list[str],
     hash_parts: list[str],
+    require_unattached: bool = False,
+    uploader_hash: str | None = None,
 ) -> list[dict[str, Any]]:
     norm_msgs: list[dict[str, Any]] = []
     for midx, msg in enumerate(raw_msgs):
@@ -278,7 +359,14 @@ def _normalize_chat_messages(
             )
         alias = str(msg.get("sender_alias", "")).strip() or f"群友{chr(65 + (midx % 26))}"
         alias = alias[:64]
-        color_idx = int(msg.get("avatar_color_idx", midx % 8))
+        raw_color = msg.get("avatar_color_idx", midx % 8)
+        if isinstance(raw_color, bool):
+            color_idx = midx % 8
+        else:
+            try:
+                color_idx = int(raw_color)
+            except (TypeError, ValueError):
+                color_idx = midx % 8
         if color_idx < 0:
             color_idx = 0
         time_label = str(msg.get("time_label", "") or "")[:32]
@@ -287,6 +375,11 @@ def _normalize_chat_messages(
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=f"chat_record message #{midx} requires non-empty content list",
+            )
+        if len(raw_content) > 20:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"chat_record message #{midx} exceeds maximum 20 content segments",
             )
         norm_content: list[dict[str, Any]] = []
         for seg in raw_content:
@@ -319,7 +412,12 @@ def _normalize_chat_messages(
                         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                         detail=f"Too many images: maximum {settings.max_images_per_submission} per submission",
                     )
-                mrow = _fetch_media_row(conn, cmid)
+                mrow = _fetch_media_row(
+                    conn,
+                    cmid,
+                    require_unattached=require_unattached,
+                    uploader_hash=uploader_hash,
+                )
                 media_ids.append(cmid)
                 hash_parts.append(f"chat_img:{mrow['sha256']}")
                 norm_content.append(
@@ -350,6 +448,8 @@ def _normalize_chat_messages(
                     img_counter=img_counter,
                     media_ids=media_ids,
                     hash_parts=hash_parts,
+                    require_unattached=require_unattached,
+                    uploader_hash=uploader_hash,
                 )
                 if norm_nested:
                     norm_content.append(
@@ -388,8 +488,12 @@ def _extract_chat_plain_texts(messages: list[dict[str, Any]], parts: list[str]) 
         for seg in msg.get("content") or []:
             if seg.get("type") == "text" and seg.get("text"):
                 msg_texts.append(str(seg.get("text", "")).strip())
-            elif seg.get("type") == "forward_quote" and isinstance(seg.get("messages"), list):
-                nested_quotes.append(seg["messages"])
+            elif seg.get("type") == "forward_quote":
+                qtitle = str(seg.get("title") or "").strip()
+                if qtitle:
+                    parts.append(qtitle)
+                if isinstance(seg.get("messages"), list):
+                    nested_quotes.append(seg["messages"])
         if msg_texts:
             joined = " ".join(msg_texts)
             parts.append(f"{alias}: {joined}" if alias else joined)
@@ -399,10 +503,18 @@ def _extract_chat_plain_texts(messages: list[dict[str, Any]], parts: list[str]) 
             _extract_chat_plain_texts(nq, parts)
 
 
-def extract_plain_texts(title: str, blocks: list[dict[str, Any]]) -> list[str]:
+def extract_plain_texts(
+    title: str,
+    blocks: list[dict[str, Any]],
+    attribution: dict[str, Any] | None = None,
+) -> list[str]:
     parts: list[str] = []
     if title:
         parts.append(title.strip())
+    if attribution:
+        sname = str(attribution.get("submitter_name") or "").strip()
+        if sname and sname not in ("匿名网友", "投稿群精选"):
+            parts.append(sname)
     for blk in blocks:
         btype = blk.get("type")
         if btype == "text" and blk.get("text"):
@@ -432,6 +544,29 @@ def build_auto_summary(title: str, blocks: list[dict[str, Any]], max_len: int = 
     if len(combined) <= max_len:
         return combined
     return combined[:max_len]
+
+
+def _sign_admin_url_if_private(url: str | None, media_id: str | None, settings: Settings) -> str | None:
+    if media_id and (not url or url.startswith("/api/v1/admin/media/")):
+        return sign_admin_media_url(media_id, settings)
+    return url
+
+
+def _sign_chat_admin_media_urls(messages: list[dict[str, Any]], settings: Settings) -> list[dict[str, Any]]:
+    msgs: list[dict[str, Any]] = []
+    for m in messages:
+        mcopy = dict(m)
+        new_content: list[dict[str, Any]] = []
+        for seg in m.get("content") or []:
+            scopy = dict(seg)
+            if scopy.get("type") in ("image", "gif") and scopy.get("media_id"):
+                scopy["url"] = _sign_admin_url_if_private(scopy.get("url"), scopy.get("media_id"), settings)
+            elif scopy.get("type") == "forward_quote" and isinstance(scopy.get("messages"), list):
+                scopy["messages"] = _sign_chat_admin_media_urls(scopy["messages"], settings)
+            new_content.append(scopy)
+        mcopy["content"] = new_content
+        msgs.append(mcopy)
+    return msgs
 
 
 def _strip_chat_media_ids(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -480,6 +615,25 @@ def serialize_meme_item(
                     rendered.append(rcopy)
                 b["rendered_images"] = rendered
                 b["messages"] = _strip_chat_media_ids(b.get("messages") or [])
+        else:
+            # Sign private /api/v1/admin/media/{id} URLs with short-lived per-resource HMAC
+            if btype in ("image", "gif") and b.get("media_id"):
+                b["url"] = _sign_admin_url_if_private(b.get("url"), b.get("media_id"), settings)
+            elif btype == "video_link" and b.get("cover_media_id"):
+                b["cover_url"] = _sign_admin_url_if_private(
+                    b.get("cover_url"), b.get("cover_media_id"), settings
+                )
+            elif btype == "chat_record":
+                rendered = []
+                for ri in b.get("rendered_images") or []:
+                    rcopy = dict(ri)
+                    if rcopy.get("media_id"):
+                        rcopy["url"] = _sign_admin_url_if_private(
+                            rcopy.get("url"), rcopy.get("media_id"), settings
+                        )
+                    rendered.append(rcopy)
+                b["rendered_images"] = rendered
+                b["messages"] = _sign_chat_admin_media_urls(b.get("messages") or [], settings)
         blocks.append(b)
 
     web_base = settings.web_base_url.rstrip("/")

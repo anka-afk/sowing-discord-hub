@@ -42,6 +42,80 @@ def _matches_tags(
     return True
 
 
+def _fetch_filtered_feed_page(
+    conn,
+    *,
+    ascending: bool,
+    cursor_seq: int | None,
+    max_nsfw: int,
+    inc_tags: list[str],
+    exc_tags: list[str],
+    limit: int,
+) -> tuple[list[Any], bool]:
+    """Fetch `limit` tag-filtered approved items using bounded SQL LIMIT chunks."""
+    matched: list[Any] = []
+    chunk_size = max(limit * 3, 60)
+    cur = cursor_seq
+
+    while len(matched) <= limit:
+        if ascending:
+            assert cur is not None
+            rows = conn.execute(
+                """
+                SELECT * FROM items
+                WHERE status = 'approved'
+                  AND seq IS NOT NULL
+                  AND seq > ?
+                  AND nsfw_level <= ?
+                ORDER BY seq ASC
+                LIMIT ?
+                """,
+                (cur, max_nsfw, chunk_size),
+            ).fetchall()
+        else:
+            if cur is not None:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM items
+                    WHERE status = 'approved'
+                      AND seq IS NOT NULL
+                      AND nsfw_level <= ?
+                      AND seq < ?
+                    ORDER BY seq DESC
+                    LIMIT ?
+                    """,
+                    (max_nsfw, cur, chunk_size),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM items
+                    WHERE status = 'approved'
+                      AND seq IS NOT NULL
+                      AND nsfw_level <= ?
+                    ORDER BY seq DESC
+                    LIMIT ?
+                    """,
+                    (max_nsfw, chunk_size),
+                ).fetchall()
+
+        if not rows:
+            break
+
+        for r in rows:
+            if _matches_tags(json.loads(r["tags_json"] or "[]"), inc_tags, exc_tags):
+                matched.append(r)
+                if len(matched) > limit:
+                    break
+
+        if len(rows) < chunk_size:
+            break
+        cur = int(rows[-1]["seq"])
+
+    has_more = len(matched) > limit
+    return matched[:limit], has_more
+
+
 @router.get("/feed")
 def get_feed(
     request: Request,
@@ -60,25 +134,15 @@ def get_feed(
     with db.read() as conn:
         if after_seq is not None:
             # Incremental cursor sync (ascending seq + tombstones)
-            rows = conn.execute(
-                """
-                SELECT * FROM items
-                WHERE status = 'approved'
-                  AND seq IS NOT NULL
-                  AND seq > ?
-                  AND nsfw_level <= ?
-                ORDER BY seq ASC
-                """,
-                (after_seq, max_nsfw),
-            ).fetchall()
-
-            matched = [
-                r
-                for r in rows
-                if _matches_tags(json.loads(r["tags_json"] or "[]"), inc_tags, exc_tags)
-            ]
-            has_more = len(matched) > limit
-            page_rows = matched[:limit]
+            page_rows, has_more = _fetch_filtered_feed_page(
+                conn,
+                ascending=True,
+                cursor_seq=after_seq,
+                max_nsfw=max_nsfw,
+                inc_tags=inc_tags,
+                exc_tags=exc_tags,
+                limit=limit,
+            )
             items = [serialize_meme_item(r, settings) for r in page_rows]
 
             if has_more and page_rows:
@@ -115,23 +179,15 @@ def get_feed(
                 next_seq = max(after_seq, max_item_seq, max_tomb_seq)
         else:
             # Browse / historical reverse-chronological mode
-            params: list[Any] = [max_nsfw]
-            where = "status = 'approved' AND seq IS NOT NULL AND nsfw_level <= ?"
-            if before_seq is not None:
-                where += " AND seq < ?"
-                params.append(before_seq)
-            rows = conn.execute(
-                f"SELECT * FROM items WHERE {where} ORDER BY seq DESC",
-                params,
-            ).fetchall()
-
-            matched = [
-                r
-                for r in rows
-                if _matches_tags(json.loads(r["tags_json"] or "[]"), inc_tags, exc_tags)
-            ]
-            has_more = len(matched) > limit
-            page_rows = matched[:limit]
+            page_rows, has_more = _fetch_filtered_feed_page(
+                conn,
+                ascending=False,
+                cursor_seq=before_seq,
+                max_nsfw=max_nsfw,
+                inc_tags=inc_tags,
+                exc_tags=exc_tags,
+                limit=limit,
+            )
             items = [serialize_meme_item(r, settings) for r in page_rows]
             tombstones = []
             if before_seq is None:

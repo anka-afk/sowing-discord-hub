@@ -250,6 +250,7 @@ export interface AdminReviewRequest {
   reject_reason?: string;
   rendered_images?: { media_id: string }[];
   edited_chat_messages?: ChatMessageNode[];
+  edited_text_blocks?: Record<string, string>;
 }
 
 export interface AdminReviewResponse {

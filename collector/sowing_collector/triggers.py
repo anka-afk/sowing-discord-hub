@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any
 
 from .config import TriggerConfig
 from .desensitizer import normalize_segments, strip_hashtag_prefix
+
+_MAX_EMOJI_TRACKED = 5000
+_MAX_EMOJIS_PER_MSG = 64
 
 
 @dataclass
@@ -23,18 +27,32 @@ class TriggerCandidate:
 class TriggerEngine:
     """Evaluates OneBot v11 events against emoji_like, essence, and #投稿 triggers."""
 
-    def __init__(self, config: TriggerConfig, watch_groups: list[int] | None = None) -> None:
+    def __init__(
+        self,
+        config: TriggerConfig,
+        watch_groups: list[int] | None = None,
+        *,
+        allow_all_groups: bool = False,
+        max_tracked_messages: int = _MAX_EMOJI_TRACKED,
+    ) -> None:
         self.config = config
         self.watch_groups: set[int] = set(watch_groups or [])
-        # (group_id, message_id) -> {emoji_id: count}
-        self._emoji_counts: dict[tuple[int, str], dict[str, int]] = {}
+        self.allow_all_groups = allow_all_groups
+        self._max_tracked = max(100, int(max_tracked_messages))
+        # (group_id, message_id) -> {emoji_id: count} (bounded LRU OrderedDict)
+        self._emoji_counts: OrderedDict[tuple[int, str], dict[str, int]] = OrderedDict()
 
-    def _is_watched_group(self, group_id: int | None) -> bool:
-        if group_id is None:
+    def _is_watched_group(self, group_id: Any) -> bool:
+        if group_id is None or isinstance(group_id, bool):
+            return False
+        try:
+            gid = int(group_id)
+        except (TypeError, ValueError):
             return False
         if not self.watch_groups:
-            return True
-        return int(group_id) in self.watch_groups
+            # Fail closed by default unless explicitly opted in
+            return self.allow_all_groups
+        return gid in self.watch_groups
 
     def process_event(self, event: dict[str, Any]) -> TriggerCandidate | None:
         post_type = event.get("post_type")
@@ -71,7 +89,14 @@ class TriggerEngine:
             if msg_id is None:
                 return None
             key = (gid, str(msg_id))
-            counts = self._emoji_counts.setdefault(key, {})
+            counts = self._emoji_counts.get(key)
+            if counts is None:
+                counts = {}
+                self._emoji_counts[key] = counts
+                while len(self._emoji_counts) > self._max_tracked:
+                    self._emoji_counts.popitem(last=False)
+            else:
+                self._emoji_counts.move_to_end(key)
 
             is_add = event.get("is_add", True)
             likes = event.get("likes")
@@ -80,6 +105,8 @@ class TriggerEngine:
                     if not isinstance(item, dict):
                         continue
                     emoji_id = str(item.get("emoji_id", "default"))
+                    if emoji_id not in counts and len(counts) >= _MAX_EMOJIS_PER_MSG:
+                        continue
                     if "count" in item and isinstance(item["count"], int):
                         # NapCat reports current absolute count for this emoji_id
                         counts[emoji_id] = max(0, int(item["count"]))
@@ -88,8 +115,9 @@ class TriggerEngine:
                         counts[emoji_id] = max(0, counts.get(emoji_id, 0) + delta)
             else:
                 emoji_id = str(event.get("emoji_id", "default"))
-                delta = 1 if is_add else -1
-                counts[emoji_id] = max(0, counts.get(emoji_id, 0) + delta)
+                if emoji_id in counts or len(counts) < _MAX_EMOJIS_PER_MSG:
+                    delta = 1 if is_add else -1
+                    counts[emoji_id] = max(0, counts.get(emoji_id, 0) + delta)
 
             net_likes = sum(counts.values())
             if net_likes >= self.config.emoji_like_threshold:

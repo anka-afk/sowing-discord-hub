@@ -12,7 +12,7 @@ import {
 } from 'lucide-vue-next';
 import type { ContentBlock } from '@/types/api';
 import { api } from '@/api/client';
-import { formatDuration } from '@/utils/format';
+import { formatDuration, safeHttpUrl } from '@/utils/format';
 import ChatPreviewCard from '@/components/ChatPreviewCard.vue';
 
 const props = withDefaults(
@@ -170,15 +170,15 @@ onBeforeUnmount(() => {
 
       <!-- Video Link Card -->
       <a
-        v-else-if="block.type === 'video_link'"
-        :href="block.url"
+        v-else-if="block.type === 'video_link' && safeHttpUrl(block.url)"
+        :href="safeHttpUrl(block.url)!"
         target="_blank"
         rel="noopener noreferrer"
         class="video-card"
       >
         <div class="video-cover">
           <img
-            v-if="block.cover_url || block.cover_media_id"
+            v-if="resolveUrl(block.cover_url, block.cover_media_id)"
             :src="resolveUrl(block.cover_url, block.cover_media_id)"
             :alt="block.title || '视频封面'"
             class="video-cover-img"

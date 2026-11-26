@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
+
+import httpx
 
 from .ac_filter import AhoCorasickFilter
 from .config import CollectorConfig
@@ -18,6 +23,32 @@ from .media import MediaValidationError, download_media, validate_media_bytes
 from .triggers import TriggerCandidate, TriggerEngine
 
 logger = logging.getLogger(__name__)
+
+
+def _redact_url_for_log(url: str) -> str:
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname or ""
+        if not host:
+            return "<redacted-url>"
+        authority = f"[{host}]" if ":" in host else host
+        try:
+            if parts.port is not None:
+                authority = f"{authority}:{parts.port}"
+        except ValueError:
+            pass
+        return urlunsplit((parts.scheme, authority, parts.path, "", ""))
+    except Exception:
+        return "<redacted-url>"
+
+
+def _hash_source_msg_id(group_id: int, message_id: str, salt: str) -> str:
+    digest = hmac.new(
+        salt.encode("utf-8"),
+        f"source_msg:{group_id}:{message_id}".encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"msg_{digest[:32]}"
 
 GetMsgFn = Callable[[str], Awaitable[dict[str, Any]]]
 GetForwardMsgFn = Callable[[str], Awaitable[list[dict[str, Any]]]]
@@ -51,7 +82,11 @@ class CollectorPipeline:
             db_path=config.storage.db_path,
             phash_threshold=config.filters.phash_hamming_threshold,
         )
-        self.triggers = TriggerEngine(config.triggers, watch_groups=config.onebot.watch_groups)
+        self.triggers = TriggerEngine(
+            config.triggers,
+            watch_groups=config.onebot.watch_groups,
+            allow_all_groups=config.onebot.allow_all_groups,
+        )
         self.ac_filter = AhoCorasickFilter(config.load_all_sensitive_words())
         self._get_msg = get_msg
         self._get_forward_msg = get_forward_msg
@@ -182,7 +217,18 @@ class CollectorPipeline:
                 self.dedup.mark_message_seen(candidate.group_id, candidate.message_id, candidate.trigger_source)
                 return ProcessOutcome(accepted=False, reason=exc.code)
             except Exception as exc:
-                logger.warning("Failed to download media %s: %s", img_ref.url, exc)
+                if isinstance(exc, httpx.HTTPStatusError):
+                    logger.warning(
+                        "Failed to download media %s: HTTPStatusError(%s)",
+                        _redact_url_for_log(img_ref.url),
+                        exc.response.status_code,
+                    )
+                else:
+                    logger.warning(
+                        "Failed to download media %s: %s",
+                        _redact_url_for_log(img_ref.url),
+                        type(exc).__name__,
+                    )
                 return ProcessOutcome(accepted=False, reason="media_download_failed")
 
             local_dup = self.dedup.check_media_duplicate(validated.sha256, validated.phash)
@@ -220,13 +266,17 @@ class CollectorPipeline:
             target_block["h"] = upload_resp.h or validated.height
             uploaded_media_records.append((validated.sha256, validated.phash))
 
-        # 7. Call POST /api/v1/internal/collector/ingest with HMAC-SHA256
+        # 7. Call POST /api/v1/internal/collector/ingest with HMAC-SHA256 (never send raw QQ group_id!)
         payload: dict[str, Any] = {
             "title": desensitized.title or "",
             "tags": desensitized.tags,
             "blocks": desensitized.blocks,
             "submitter_hash": desensitized.submitter_hash,
-            "source_msg_id": f"{candidate.group_id}:{candidate.message_id}",
+            "source_msg_id": _hash_source_msg_id(
+                candidate.group_id,
+                candidate.message_id,
+                self.config.hub.submitter_salt,
+            ),
             "attribution": {
                 "submitter_name": "匿名群友",
                 "origin_label": desensitized.origin_label,

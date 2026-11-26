@@ -73,28 +73,66 @@ export class HubApiClient {
     return qs ? `${full}?${qs}` : full;
   }
 
+  private getExpectedApiOrigin(): string | null {
+    try {
+      const base = this.baseUrl || (typeof window !== 'undefined' ? window.location.origin : '');
+      if (!base) return null;
+      return new URL(base, typeof window !== 'undefined' ? window.location.origin : 'http://localhost').origin;
+    } catch {
+      return null;
+    }
+  }
+
+  private isTrustedApiUrl(rawUrl: string): boolean {
+    const trimmed = rawUrl.trim();
+    if (!trimmed || /[\u0000-\u001f\u007f\\]/.test(trimmed) || trimmed.startsWith('//')) {
+      return false;
+    }
+    const expectedOrigin = this.getExpectedApiOrigin();
+    if (!expectedOrigin) return false;
+    try {
+      const fallbackBase =
+        typeof window !== 'undefined' ? window.location.origin : expectedOrigin;
+      const parsed = new URL(trimmed, fallbackBase);
+      if (parsed.username || parsed.password) return false;
+      return (
+        (parsed.protocol === 'http:' || parsed.protocol === 'https:') &&
+        parsed.origin === expectedOrigin
+      );
+    } catch {
+      return false;
+    }
+  }
+
   resolveMediaUrl(urlOrPath?: string | null, mediaId?: string | null, isAdminContext = false): string {
-    const token = this.getTokenFn();
     if (urlOrPath) {
-      if (/^https?:\/\//i.test(urlOrPath) || urlOrPath.startsWith('blob:') || urlOrPath.startsWith('data:')) {
-        if (isAdminContext && token && urlOrPath.includes('/api/v1/admin/media/') && !urlOrPath.includes('token=')) {
-          const sep = urlOrPath.includes('?') ? '&' : '?';
-          return `${urlOrPath}${sep}token=${encodeURIComponent(token)}`;
+      const trimmed = urlOrPath.trim();
+      if (!trimmed || /[\u0000-\u001f\u007f\\]/.test(trimmed) || trimmed.startsWith('//')) {
+        return '';
+      }
+      // Never pass through data:, javascript:, or other unsafe schemes; never inject JWT into URL query strings
+      if (/^blob:/i.test(trimmed)) {
+        return trimmed;
+      }
+      if (/^https?:\/\//i.test(trimmed)) {
+        try {
+          const parsed = new URL(trimmed);
+          if ((parsed.protocol !== 'http:' && parsed.protocol !== 'https:') || parsed.username || parsed.password) {
+            return '';
+          }
+          return parsed.href;
+        } catch {
+          return '';
         }
-        return urlOrPath;
       }
-      const prefixed = `${this.baseUrl}${urlOrPath.startsWith('/') ? '' : '/'}${urlOrPath}`;
-      if (isAdminContext && token && urlOrPath.includes('/api/v1/admin/media/') && !prefixed.includes('token=')) {
-        const sep = prefixed.includes('?') ? '&' : '?';
-        return `${prefixed}${sep}token=${encodeURIComponent(token)}`;
+      if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(trimmed)) {
+        return '';
       }
-      return prefixed;
+      return `${this.baseUrl}${trimmed.startsWith('/') ? '' : '/'}${trimmed}`;
     }
     if (mediaId) {
       if (isAdminContext) {
-        return this.buildUrl(`/api/v1/admin/media/${encodeURIComponent(mediaId)}`, {
-          token: token ?? undefined,
-        });
+        return this.buildUrl(`/api/v1/admin/media/${encodeURIComponent(mediaId)}`);
       }
       return this.buildUrl(`/media/public/${encodeURIComponent(mediaId)}`);
     }
@@ -289,10 +327,13 @@ export class HubApiClient {
   }
 
   async fetchBlobWithAuth(url: string): Promise<Blob> {
-    const token = this.getTokenFn();
     const headers: Record<string, string> = {};
-    if (token) {
-      headers.Authorization = `Bearer ${token}`;
+    // Only attach Admin Bearer JWT when the target origin strictly matches the configured Hub API origin
+    if (this.isTrustedApiUrl(url)) {
+      const token = this.getTokenFn();
+      if (token) {
+        headers.Authorization = `Bearer ${token}`;
+      }
     }
     const res = await this.fetchImpl(url, { headers });
     if (!res.ok) {

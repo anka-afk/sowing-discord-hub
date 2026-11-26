@@ -15,8 +15,36 @@ from typing import Optional
 
 from app.config import Settings
 from app.db import Database, utc_now_iso
-from app.security import hash_password
+from app.security import hash_password, salted_hmac, sha256_hex
 from app.ulid import generate_prefixed_id
+
+
+def register_user_token(
+    db: Database,
+    settings: Settings,
+    raw_token: str,
+    trust_level: int = 1,
+) -> str:
+    """Pre-register a trusted contributor X-User-Token in submitter_reputation."""
+    clean = raw_token.strip()
+    if len(clean) < 12:
+        raise ValueError("user_token must be at least 12 characters")
+    token_hash = sha256_hex(clean)
+    submitter_hash = salted_hmac(token_hash, settings, namespace="user_token")
+    with db.write() as conn:
+        conn.execute(
+            """
+            INSERT INTO submitter_reputation (
+                submitter_hash, user_token_hash, trust_level, approved_cnt, rejected_cnt, muted_until
+            )
+            VALUES (?, ?, ?, 0, 0, NULL)
+            ON CONFLICT(submitter_hash) DO UPDATE SET
+                user_token_hash = excluded.user_token_hash,
+                trust_level = MAX(submitter_reputation.trust_level, excluded.trust_level)
+            """,
+            (submitter_hash, token_hash, max(1, int(trust_level))),
+        )
+    return submitter_hash
 
 
 def create_admin(
@@ -60,10 +88,16 @@ def list_admins(db: Database) -> list[dict]:
 
 def set_admin_active(db: Database, username: str, active: bool) -> bool:
     with db.write() as conn:
-        cur = conn.execute(
-            "UPDATE admins SET is_active = ? WHERE username = ?",
-            (1 if active else 0, username.strip()),
-        )
+        if active:
+            cur = conn.execute(
+                "UPDATE admins SET is_active = 1 WHERE username = ?",
+                (username.strip(),),
+            )
+        else:
+            cur = conn.execute(
+                "UPDATE admins SET is_active = 0, token_version = token_version + 1 WHERE username = ?",
+                (username.strip(),),
+            )
         return cur.rowcount > 0
 
 
@@ -73,7 +107,7 @@ def reset_admin_password(db: Database, username: str, password: str) -> bool:
     pwd_hash = hash_password(password)
     with db.write() as conn:
         cur = conn.execute(
-            "UPDATE admins SET password_hash = ? WHERE username = ?",
+            "UPDATE admins SET password_hash = ?, token_version = token_version + 1 WHERE username = ?",
             (pwd_hash, username.strip()),
         )
         return cur.rowcount > 0

@@ -17,9 +17,10 @@ onebot:
   # 单个官方号的 OneBot v11 正向 WebSocket 地址（如 NapCat / LLOneBot）
   ws_url: "ws://127.0.0.1:3001"
   access_token: ""
-  # 仅监听指定的官方投稿群号；留空则监听所有群
+  # 仅监听指定的官方投稿群号；默认 fail-closed（留空时忽略所有群，除非显式设置 allow_all_groups: true）
   watch_groups:
     - 123456789
+  allow_all_groups: false
   reconnect_interval_sec: 5.0
   action_timeout_sec: 15.0
 

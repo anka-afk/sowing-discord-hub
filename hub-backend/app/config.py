@@ -53,6 +53,7 @@ class Settings(BaseSettings):
     hub_id: str = "official-main"
     hub_name: str = "Sowing Discord Hub"
     schema_version: str = "1.0"
+    app_env: str = "development"  # development | test | production
     web_base_url: str = "https://banshi.ankaanka.org"
     api_base_url: str = "http://localhost:8000"
 
@@ -65,11 +66,13 @@ class Settings(BaseSettings):
     public_media_base_url: str = "http://localhost:8000/media/public"
     storage_limit_bytes: int = 10 * 1024 * 1024 * 1024  # 10 GB
 
-    # Cloudflare R2 (S3-compatible)
+    # Cloudflare R2 (S3-compatible) — supports split private/public buckets
     r2_endpoint_url: str = ""
     r2_access_key_id: str = ""
     r2_secret_access_key: str = ""
     r2_bucket_name: str = "sowing-discord-media"
+    r2_private_bucket_name: str = ""
+    r2_public_bucket_name: str = ""
     r2_region: str = "auto"
 
     # Optional Cloudflare Cache Purge
@@ -80,9 +83,12 @@ class Settings(BaseSettings):
     jwt_secret: str = "dev-jwt-secret-change-in-production-32bytes"
     jwt_algorithm: str = "HS256"
     jwt_expire_seconds: int = 86400
+    admin_media_url_ttl_seconds: int = 300
     hmac_salt: str = "dev-hmac-salt-change-in-production"
     collector_hmac_secret: str = "dev-collector-hmac-secret"
     collector_max_skew_seconds: int = 300
+    rate_limit_enabled: bool = True
+    max_json_body_bytes: int = 512 * 1024  # 512 KB
 
     # Turnstile
     turnstile_enabled: bool = False
@@ -136,6 +142,48 @@ class Settings(BaseSettings):
         if raw == "*":
             return ["*"]
         return [o.strip() for o in raw.split(",") if o.strip()]
+
+    @property
+    def is_production(self) -> bool:
+        return self.app_env.strip().lower() in ("production", "prod")
+
+    @property
+    def effective_r2_private_bucket(self) -> str:
+        return self.r2_private_bucket_name.strip() or self.r2_bucket_name
+
+    @property
+    def effective_r2_public_bucket(self) -> str:
+        return self.r2_public_bucket_name.strip() or self.r2_bucket_name
+
+    def validate_production_security(self) -> None:
+        """Fail fast at startup if insecure default secrets are active in production."""
+        if not self.is_production:
+            return
+        insecure: list[str] = []
+        if (
+            self.jwt_secret == "dev-jwt-secret-change-in-production-32bytes"
+            or len(self.jwt_secret) < 32
+        ):
+            insecure.append("JWT_SECRET (>=32 random chars required)")
+        if (
+            self.hmac_salt == "dev-hmac-salt-change-in-production"
+            or len(self.hmac_salt) < 16
+        ):
+            insecure.append("HMAC_SALT (>=16 random chars required)")
+        if (
+            self.collector_hmac_secret == "dev-collector-hmac-secret"
+            or len(self.collector_hmac_secret) < 16
+        ):
+            insecure.append("COLLECTOR_HMAC_SECRET (>=16 random chars required)")
+        if self.admin_password != "" and (
+            self.admin_password == "admin123456" or len(self.admin_password) < 12
+        ):
+            insecure.append("ADMIN_PASSWORD (must not be default and >=12 chars, or empty to disable auto-seed)")
+        if insecure:
+            raise RuntimeError(
+                "Refusing to start in APP_ENV=production with insecure settings: "
+                + ", ".join(insecure)
+            )
 
     def ensure_dirs(self) -> None:
         Path(self.database_path).parent.mkdir(parents=True, exist_ok=True)
