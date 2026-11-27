@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import ipaddress
+import os
 import socket
 from dataclasses import dataclass
 from typing import Any
@@ -20,7 +21,12 @@ _NAT64_WK = ipaddress.IPv6Network("64:ff9b::/96")
 _NAT64_LOCAL = ipaddress.IPv6Network("64:ff9b:1::/48")
 _IPV4_TRANSLATED = ipaddress.IPv6Network("::ffff:0:0:0/96")
 _IPV4_COMPATIBLE = ipaddress.IPv6Network("::/96")
+_FAKE_IP_NET = ipaddress.IPv4Network("198.18.0.0/15")
 _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+
+
+def _allow_fake_ip_dns() -> bool:
+    return os.getenv("COLLECTOR_ALLOW_FAKE_IP_DNS", "").strip().lower() in ("1", "true", "yes")
 
 
 class MediaValidationError(ValueError):
@@ -31,11 +37,13 @@ class MediaValidationError(ValueError):
         self.code = code
 
 
-def _is_public_ip(ip_str: str) -> bool:
+def _is_public_ip(ip_str: str, *, allow_fake_ip: bool = False) -> bool:
     try:
         addr = ipaddress.ip_address(ip_str)
     except ValueError:
         return False
+    if isinstance(addr, ipaddress.IPv4Address) and allow_fake_ip and addr in _FAKE_IP_NET:
+        return True
     if isinstance(addr, ipaddress.IPv6Address):
         if addr.ipv4_mapped is not None:
             addr = addr.ipv4_mapped
@@ -120,8 +128,9 @@ async def _resolve_and_validate_host(host: str, port: int) -> list[str]:
                 ips.append(ip_str)
     if not ips:
         raise MediaValidationError("dns_failed", f"No DNS records for media host: {normalized}")
+    allow_fake_ip = _allow_fake_ip_dns()
     for ip_str in ips:
-        if not _is_public_ip(ip_str):
+        if not _is_public_ip(ip_str, allow_fake_ip=allow_fake_ip):
             raise MediaValidationError("ssrf_blocked", f"Resolved non-public IP blocked for host: {normalized}")
     return ips
 

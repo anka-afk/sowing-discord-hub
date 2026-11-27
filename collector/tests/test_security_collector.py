@@ -106,6 +106,22 @@ async def test_safe_public_network_backend_pins_resolved_ip_and_blocks_rebinding
     assert exc_info.value.code == "ssrf_blocked"
 
 
+    # Direct Fake-IP literal must ALWAYS remain blocked even if opt-in DNS flag is enabled
+    monkeypatch.setenv("COLLECTOR_ALLOW_FAKE_IP_DNS", "1")
+    with pytest.raises(MediaValidationError) as fake_lit_exc:
+        await validate_public_media_url("http://198.18.4.117/test.png")
+    assert fake_lit_exc.value.code == "ssrf_blocked"
+
+    # Opt-in Fake-IP DNS resolution succeeds only for DNS hostnames (never for loopback/private)
+    async def fake_getaddrinfo_clash(host, port, **kwargs):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("198.18.4.117", port))]
+
+    monkeypatch.setattr(loop, "getaddrinfo", fake_getaddrinfo_clash)
+    await backend.connect_tcp("multimedia.nt.qq.com.cn", 443)
+    assert dialed_hosts[-1] == ("198.18.4.117", 443)
+    monkeypatch.delenv("COLLECTOR_ALLOW_FAKE_IP_DNS", raising=False)
+
+
 @pytest.mark.asyncio
 async def test_download_media_blocks_unsafe_redirects_and_streaming_overflow():
     def redirect_to_loopback(request: httpx.Request) -> httpx.Response:
