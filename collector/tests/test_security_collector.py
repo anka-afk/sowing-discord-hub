@@ -14,6 +14,7 @@ from sowing_collector.hub_client import HubCollectorClient
 from sowing_collector.media import (
     MediaValidationError,
     _SafePublicNetworkBackend,
+    _SafePublicTransport,
     detect_magic_mime,
     download_media,
     validate_media_bytes,
@@ -61,6 +62,15 @@ async def test_collector_ssrf_blocks_private_loopback_transition_and_malformed_u
     ]:
         with pytest.raises(MediaValidationError):
             await validate_public_media_url(bad)
+
+
+@pytest.mark.asyncio
+async def test_safe_public_transport_and_default_backend_instantiate_cleanly():
+    transport = _SafePublicTransport()
+    assert isinstance(transport._pool._network_backend, _SafePublicNetworkBackend)
+    await transport.aclose()
+    default_backend = _SafePublicNetworkBackend()
+    assert default_backend._inner is not None
 
 
 @pytest.mark.asyncio

@@ -177,7 +177,7 @@ class _SafePublicNetworkBackend(httpcore.AsyncNetworkBackend):
     """Connect-time DNS pinning network backend eliminating DNS-rebinding TOCTOU."""
 
     def __init__(self, inner: httpcore.AsyncNetworkBackend | None = None) -> None:
-        self._inner = inner or httpcore.AutoBackend()
+        self._inner = inner or httpcore.AnyIOBackend()
 
     async def connect_tcp(
         self,
@@ -222,7 +222,7 @@ class _SafePublicTransport(httpx.AsyncHTTPTransport):
     def __init__(self, **kwargs: Any) -> None:
         kwargs["trust_env"] = False
         super().__init__(**kwargs)
-        self._pool._network_backend = _SafePublicNetworkBackend()
+        self._pool._network_backend = _SafePublicNetworkBackend(inner=self._pool._network_backend)
 
 
 @dataclass
