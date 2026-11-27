@@ -775,17 +775,25 @@ export async function renderChatRecordToSlices(
       cursorY += bubble.totalHeight + layout.bubbleGap;
     }
 
-    // Footer Watermark
+    // Subtle Editorial Brand Footer (minimal, never overlays content)
     const footerY = canvas.height - layout.footerHeight / 2;
+    const isLastPage = page.pageIndex === totalPages - 1;
     ctx.fillStyle = palette.footerText;
-    ctx.font = `400 12px ${CHAT_FONT_FAMILY}`;
+    ctx.font = `500 13px ${CHAT_FONT_FAMILY}`;
     ctx.textBaseline = 'middle';
-    ctx.fillText('Sowing Discord Hub · 脱敏群聊存档', layout.paddingX, footerY);
-    if (totalPages > 1) {
-      ctx.textAlign = 'right';
-      ctx.fillText(`${page.pageIndex + 1}/${totalPages}`, canvas.width - layout.paddingX, footerY);
-      ctx.textAlign = 'left';
-    }
+    ctx.textAlign = 'left';
+    ctx.fillText('搬史中枢 · banshi.ankaanka.org', layout.paddingX, footerY);
+
+    ctx.font = `400 12px ${CHAT_FONT_FAMILY}`;
+    ctx.textAlign = 'right';
+    const rightFooter =
+      totalPages > 1
+        ? isLastPage
+          ? `脱敏存档 · 逛史库 / 投稿 · ${page.pageIndex + 1}/${totalPages}`
+          : `${page.pageIndex + 1}/${totalPages}`
+        : '脱敏存档 · 逛史库 / 投稿';
+    ctx.fillText(rightFooter, canvas.width - layout.paddingX, footerY);
+    ctx.textAlign = 'left';
 
     const { blob, mime } = await canvasToWebpBlob(canvas, options.quality ?? 0.90);
     slices.push({

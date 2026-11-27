@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useRoute } from 'vue-router';
 import {
   AlertOctagon,
@@ -48,18 +48,44 @@ async function loadItem() {
   }
 }
 
+const DEFAULT_DOC_TITLE = 'Sowing Discord Hub · 搬史中枢';
+
+function syncDocumentTitle(current: MemeItem | null) {
+  if (typeof document === 'undefined') return;
+  const heading = current?.title?.trim() || current?.summary?.trim().slice(0, 32);
+  document.title = heading ? `${heading} · 搬史中枢` : DEFAULT_DOC_TITLE;
+}
+
+function buildShareText(current: MemeItem | null, url: string): string {
+  const headline =
+    current?.title?.trim() ||
+    (current?.summary?.trim()
+      ? current.summary.trim().slice(0, 40) + (current.summary.trim().length > 40 ? '…' : '')
+      : '');
+  return headline
+    ? `「${headline}」— 来自搬史中枢 ${url}`
+    : `分享一条精选史料 — 来自搬史中枢 ${url}`;
+}
+
 async function copyLink() {
   const url = window.location.href;
+  const text = buildShareText(item.value, url);
   try {
-    await navigator.clipboard.writeText(url);
-    toast.success('详情链接已复制', url);
+    await navigator.clipboard.writeText(text);
+    toast.success('分享文案已复制', text);
   } catch {
     toast.info('当前链接', url);
   }
 }
 
+watch(item, syncDocumentTitle);
 watch(itemId, loadItem);
 onMounted(loadItem);
+onBeforeUnmount(() => {
+  if (typeof document !== 'undefined') {
+    document.title = DEFAULT_DOC_TITLE;
+  }
+});
 </script>
 
 <template>
@@ -100,7 +126,7 @@ onMounted(loadItem);
           <span class="mono muted id-chip">{{ item.id }}</span>
         </div>
         <button type="button" class="btn btn-sm" @click="copyLink">
-          <Copy :size="14" /> 复制分享链接
+          <Copy :size="14" /> 复制分享
         </button>
       </header>
 

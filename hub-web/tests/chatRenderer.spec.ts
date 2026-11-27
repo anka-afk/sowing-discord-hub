@@ -215,6 +215,9 @@ describe('renderChatRecordToSlices canvas pipeline', () => {
       });
 
       expect(slices.length).toBeGreaterThan(1);
+      const drawnTexts = (fakeCtx.fillText as ReturnType<typeof vi.fn>).mock.calls.map((c) => String(c[0]));
+      expect(drawnTexts).toContain('搬史中枢 · banshi.ankaanka.org');
+      expect(drawnTexts.some((t) => t.includes('脱敏存档 · 逛史库 / 投稿'))).toBe(true);
       for (const s of slices) {
         expect(s.width).toBe(CHAT_CANVAS_WIDTH);
         expect(s.height).toBeLessThanOrEqual(CHAT_MAX_SLICE_HEIGHT);
